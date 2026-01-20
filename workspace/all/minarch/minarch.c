@@ -4107,7 +4107,9 @@ static const char* bitmap_font[] = {
 	}
 	
 	static void blitBitmapText(char* text, int ox, int oy, uint32_t* data, int stride, int width, int height) {
+		#ifndef CHAR_WIDTH
 		#define CHAR_WIDTH 5
+		#endif
 		#define CHAR_HEIGHT 9
 		#define LETTERSPACING 1
 	
