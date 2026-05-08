@@ -776,6 +776,23 @@ bool Cheats_load() {
 
 	LOG_info("Found %i cheats for the current game.\n", cheatcodes.count);
 
+	// RA hardcore: parse the file so the menu can list available cheats,
+	// but force every entry to disabled so they can never be applied.
+	// One-time notification per game-load when entries were force-disabled.
+	if (RA_isHardcoreModeActive()) {
+		int forced = 0;
+		for (int ci = 0; ci < cheatcodes.count; ci++) {
+			if (cheatcodes.cheats[ci].enabled) {
+				cheatcodes.cheats[ci].enabled = 0;
+				forced++;
+			}
+		}
+		if (forced > 0) {
+			LOG_info("Cheats: force-disabled %i entries (hardcore mode)\n", forced);
+			Notification_push(NOTIFICATION_ACHIEVEMENT, "Cheats disabled in Hardcore mode", NULL);
+		}
+	}
+
 	success = 1;
 finish:
 	if (!success) {
@@ -1082,13 +1099,10 @@ error:
 }
 
 static int State_write(void) { // from picoarch
-	// Block save states in RetroAchievements hardcore mode
-	if (RA_isHardcoreModeActive()) {
-		LOG_info("State save blocked - hardcore mode active\n");
-		Notification_push(NOTIFICATION_ACHIEVEMENT, "Save states disabled in Hardcore mode", NULL);
-		return 0;
-	}
-	
+	// RA hardcore: per spec, manual save states ARE allowed (debugging);
+	// load is what's blocked (see State_read). Auto-resume save is gated
+	// in State_autosave() below.
+
 	int success = 0;
 	size_t state_size = core.serialize_size();
 	if (!state_size) return 0;
@@ -1149,6 +1163,13 @@ error:
 }
 
 static void State_autosave(void) {
+	// RA hardcore: never write auto-resume state. Quick-resume / sleep
+	// resume relies on this slot, and the spec requires hardcore games
+	// to start cleanly (no state load).
+	if (RA_isHardcoreModeActive()) {
+		LOG_info("State autosave skipped - hardcore mode active\n");
+		return;
+	}
 	int last_state_slot = state_slot;
 	state_slot = AUTO_RESUME_SLOT;
 	State_write();
@@ -1157,7 +1178,16 @@ static void State_autosave(void) {
 static void Rewind_on_state_change(void);
 static void State_resume(void) {
 	if (!exists(RESUME_SLOT_PATH)) return;
-	
+
+	// RA hardcore: launcher always writes RESUME_SLOT_PATH; consume it
+	// silently in hardcore so the user does not get a load-blocked
+	// notification on every game launch. State_read() would block anyway.
+	if (RA_isHardcoreModeActive()) {
+		unlink(RESUME_SLOT_PATH);
+		LOG_info("State resume skipped - hardcore mode active\n");
+		return;
+	}
+
 	int last_state_slot = state_slot;
 	state_slot = getInt(RESUME_SLOT_PATH);
 	unlink(RESUME_SLOT_PATH);
@@ -1491,6 +1521,13 @@ static int Rewind_compress_state(const uint8_t *src, size_t *dest_len, int *is_k
 
 static int Rewind_init(size_t state_size) {
 	Rewind_free();
+	// RA hardcore: rewind buffer must not be allocated, and the worker
+	// thread must not run. Re-checked in RA_setHardcoreEnabled() (Phase 2)
+	// so flipping the toggle mid-session also tears the buffer down.
+	if (RA_isHardcoreModeActive()) {
+		LOG_info("Rewind: skipped init - hardcore mode active\n");
+		return 0;
+	}
 	// pull current option values directly
 	int enable = rewind_cfg_enable;
 	int buf_mb = rewind_cfg_buffer_mb;
@@ -4281,6 +4318,17 @@ static void input_poll_callback(void) {
 				}
 			}
 			else if (i==SHORTCUT_HOLD_REWIND) {
+				// RA hardcore: rewind is a banned feature
+				if (RA_isHardcoreModeActive()) {
+					if (PAD_justPressed(btn)) {
+						LOG_info("Rewind (hold) blocked - hardcore mode active\n");
+						Notification_push(NOTIFICATION_ACHIEVEMENT, "Rewind disabled in Hardcore mode", NULL);
+						if (mapping->mod) ignore_menu = 1;
+					}
+					rewind_pressed = 0;
+					last_rewind_pressed = 0;
+					break;
+				}
 				rewind_pressed = PAD_isPressed(btn) ? 1 : 0;
 				if (rewind_pressed != last_rewind_pressed) {
 					LOG_info("Rewind hotkey %s\n", rewind_pressed ? "pressed" : "released");
@@ -4297,6 +4345,16 @@ static void input_poll_callback(void) {
 				if (mapping->mod && rewind_pressed) ignore_menu = 1;
 			}
 			else if (i==SHORTCUT_TOGGLE_REWIND) {
+				// RA hardcore: rewind is a banned feature
+				if (RA_isHardcoreModeActive()) {
+					if (PAD_justPressed(btn)) {
+						LOG_info("Rewind (toggle) blocked - hardcore mode active\n");
+						Notification_push(NOTIFICATION_ACHIEVEMENT, "Rewind disabled in Hardcore mode", NULL);
+						if (mapping->mod) ignore_menu = 1;
+					}
+					rewind_toggle = 0;
+					break;
+				}
 				if (PAD_justPressed(btn)) {
 					rewind_toggle = !rewind_toggle;
 					if (rewind_toggle && ff_toggled) {
@@ -4347,12 +4405,16 @@ static void input_poll_callback(void) {
 					case SHORTCUT_SAVE_QUIT:
 						newScreenshot = 1;
 						quit = 1;
-						Menu_saveState();
+						// RA hardcore: skip auto-save so resume boots ROM cleanly
+						if (!RA_isHardcoreModeActive())
+							Menu_saveState();
 						break;
 					case SHORTCUT_GAMESWITCHER:
 						newScreenshot = 1;
 						quit = 1;
-						Menu_saveState();
+						// RA hardcore: skip auto-save; switcher will boot ROM cleanly
+						if (!RA_isHardcoreModeActive())
+							Menu_saveState();
 						putFile(GAME_SWITCHER_PERSIST_PATH, game.path + strlen(SDCARD_PATH));
 						break;
 					case SHORTCUT_CYCLE_SCALE:
@@ -6093,6 +6155,14 @@ void Core_applyCheats(struct Cheats *cheats)
 		return;
 
 	core.cheat_reset();
+
+	// RA hardcore: cheat application is forbidden. Reset clears any
+	// prior cheats; we then skip the per-entry cheat_set loop.
+	if (RA_isHardcoreModeActive()) {
+		LOG_info("Cheats: apply skipped - hardcore mode active\n");
+		return;
+	}
+
 	for (int i = 0; i < cheats->count; i++) {
 		if (cheats->cheats[i].enabled) {
 			core.cheat_set(i, cheats->cheats[i].enabled, cheats->cheats[i].code);
@@ -6274,8 +6344,12 @@ void Menu_beforeSleep() {
 	SRAM_write();
 	RTC_write();
 	State_autosave();
-	putFile(AUTO_RESUME_PATH, game.path + strlen(SDCARD_PATH));
-	
+	// RA hardcore: don't advertise an auto-resume marker if no state was
+	// written (State_autosave() above no-ops in hardcore). Boot into the
+	// game switcher / menu cleanly instead of silently failing to load.
+	if (!RA_isHardcoreModeActive())
+		putFile(AUTO_RESUME_PATH, game.path + strlen(SDCARD_PATH));
+
 	PWR_setCPUSpeed(CPU_SPEED_MENU);
 }
 void Menu_afterSleep() {
