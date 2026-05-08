@@ -42,5 +42,9 @@ audiomon.elf
 workspace/hash.txt
 workspace/readmes
 
+# Local AI agent configurations
 AGENTS.md
 CLAUDE.md
+.claude
+.pi
+.pi-lens
