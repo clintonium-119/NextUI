@@ -171,4 +171,18 @@ void RA_setMemoryMap(const void* mmap);
  */
 void RA_initMemoryRegions(uint32_t console_id);
 
+/**
+ * Callback minarch supplies to perform the soft→hardcore mid-session
+ * transition: reset the running core, drop any active cheats, and free
+ * the rewind buffer. Invoked from ra_integration's reconnect handlers
+ * when rcheevos flips back to user-preferred hardcore mid-game.
+ */
+typedef void (*RA_HardcoreTransitionFunc)(void);
+
+/**
+ * Register the soft→hardcore transition callback (see typedef above).
+ * Pass NULL to clear. Safe to call before or after RA_init().
+ */
+void RA_setHardcoreTransitionCallback(RA_HardcoreTransitionFunc fn);
+
 #endif // __RA_INTEGRATION_H__

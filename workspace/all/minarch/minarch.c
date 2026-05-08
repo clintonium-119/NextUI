@@ -1522,8 +1522,8 @@ static int Rewind_compress_state(const uint8_t *src, size_t *dest_len, int *is_k
 static int Rewind_init(size_t state_size) {
 	Rewind_free();
 	// RA hardcore: rewind buffer must not be allocated, and the worker
-	// thread must not run. Re-checked in RA_setHardcoreEnabled() (Phase 2)
-	// so flipping the toggle mid-session also tears the buffer down.
+	// thread must not run. Reconnect-driven soft→hardcore transitions
+	// also tear the buffer down via Hardcore_onEnableTransition().
 	if (RA_isHardcoreModeActive()) {
 		LOG_info("Rewind: skipped init - hardcore mode active\n");
 		return 0;
@@ -6170,6 +6170,34 @@ void Core_applyCheats(struct Cheats *cheats)
 	}
 }
 
+// RA hardcore: invoked by ra_integration when hardcore is toggled ON
+// mid-session (settings change after reconnect, future in-game toggle).
+// Resets the running game per RA spec, drops any active cheats, and
+// tears down the rewind buffer.
+void Hardcore_onEnableTransition(void)
+{
+	LOG_info("Hardcore transition: resetting core, clearing cheats, freeing rewind buffer\n");
+
+	// Drop any currently-active cheats. Force every entry's enabled flag
+	// to 0 so the in-game cheats menu reflects the new state, and call
+	// the core's cheat_reset to flush its internal state.
+	if (cheatcodes.cheats) {
+		for (int i = 0; i < cheatcodes.count; i++) {
+			cheatcodes.cheats[i].enabled = 0;
+		}
+	}
+	if (core.cheat_reset)
+		core.cheat_reset();
+
+	// Tear down rewind. Rewind_init() is gated on hardcore so it won't
+	// come back until hardcore is turned off again.
+	Rewind_free();
+
+	// Full game reset — spec-required for soft→hardcore mid-session.
+	if (core.reset)
+		core.reset();
+}
+
 int Core_updateAVInfo(void) {
 	struct retro_system_av_info av_info = {};
 	core.get_system_av_info(&av_info);
@@ -9155,6 +9183,7 @@ int main(int argc , char* argv[]) {
 	// Initialize RetroAchievements after core.init() but before Core_load()
 	// Set up memory accessors for achievement memory reading
 	RA_setMemoryAccessors(core.get_memory_data, core.get_memory_size);
+	RA_setHardcoreTransitionCallback(Hardcore_onEnableTransition);
 	RA_init();
 
 	// TODO: find a better place to do this

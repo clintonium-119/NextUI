@@ -109,6 +109,12 @@ static rc_client_t* ra_client = NULL;
 static RALoginState ra_login_state = LOGIN_IDLE;
 static RAGameState  ra_game_state  = GAME_NONE;
 
+/* Soft→hardcore transition callback (minarch supplies it via
+ * RA_setHardcoreTransitionCallback). Defined further down; declared
+ * here so the connectivity event handlers can reference it before its
+ * setter appears in the file. */
+static RA_HardcoreTransitionFunc ra_hardcore_transition_cb;
+
 // Current game hash (for mute file path)
 static char ra_game_hash[64] = {0};
 
@@ -1405,16 +1411,22 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 		// Stop probe (redundant — rcheevos already confirmed connectivity)
 		ra_stop_connectivity_probe();
 		RA_Offline_setOffline(false);
-		// Re-enable hardcore if configured
+		// Re-enable hardcore if configured. Soft→hardcore mid-session
+		// requires a full game reset per RA spec; the transition callback
+		// (registered by minarch) drives core.reset() + cheat reset +
+		// rewind teardown. rc_client_reset() then clears waiting_for_reset.
 		if (CFG_getRAHardcoreMode()) {
 			rc_client_set_hardcore_enabled(client, 1);
 			RA_LOG_INFO("Hardcore re-enabled after reconnection\n");
-			// rc_client_set_hardcore_enabled() sets waiting_for_reset=1 which
-			// blocks rc_client_do_frame() from processing any achievements.
-			// We must call rc_client_reset() to acknowledge the reset and
-			// clear the flag.
+			if (ra_game_state == GAME_LOADED && ra_hardcore_transition_cb) {
+				ra_hardcore_transition_cb();
+			}
 			rc_client_reset(client);
 			RA_LOG_DEBUG("rc_client_reset complete (cleared waiting_for_reset)\n");
+			if (ra_game_state == GAME_LOADED) {
+				Notification_push(NOTIFICATION_ACHIEVEMENT,
+				                  "Hardcore mode ON — game reset", NULL);
+			}
 			uint32_t fixed = ra_reapply_pending_unlocks(client, ra_game_hash);
 			if (fixed > 0) {
 				RA_LOG_INFO("Re-applied %u offline unlock(s) after "
@@ -2503,13 +2515,22 @@ static void action_probe_online(const RAEvent* ev) {
 		ra_user_saw_offline = false;
 	}
 	
-	// Re-enable hardcore if configured
+	// Re-enable hardcore if configured. Soft→hardcore mid-session triggers
+	// the transition callback (core.reset() + cheat reset + rewind teardown)
+	// per RA spec; rc_client_reset() then clears waiting_for_reset.
 	if (ev->data.probe_online.hardcore_enable) {
 		if (ra_client && CFG_getRAHardcoreMode()) {
 			rc_client_set_hardcore_enabled(ra_client, 1);
 			RA_LOG_INFO("Hardcore re-enabled after online transition\n");
+			if (ra_game_state == GAME_LOADED && ra_hardcore_transition_cb) {
+				ra_hardcore_transition_cb();
+			}
 			rc_client_reset(ra_client);
 			RA_LOG_DEBUG("rc_client_reset complete (cleared waiting_for_reset)\n");
+			if (ra_game_state == GAME_LOADED) {
+				Notification_push(NOTIFICATION_ACHIEVEMENT,
+				                  "Hardcore mode ON — game reset", NULL);
+			}
 			uint32_t fixed = ra_reapply_pending_unlocks(ra_client, ra_game_hash);
 			if (fixed > 0) {
 				RA_LOG_INFO("Re-applied %u offline unlock(s) after "
@@ -2792,6 +2813,16 @@ void RA_idle(void) {
 
 bool RA_isGameLoaded(void) {
 	return ra_game_state == GAME_LOADED;
+}
+
+/* Soft→hardcore transition callback registered by minarch (core reset,
+ * cheat reset, rewind teardown). NULL until minarch registers one.
+ * Invoked from the two reconnect paths above when we flip rcheevos from
+ * forced-softcore back to user-preferred hardcore mid-session.
+ * (Forward-declared near the top of this file.) */
+
+void RA_setHardcoreTransitionCallback(RA_HardcoreTransitionFunc fn) {
+	ra_hardcore_transition_cb = fn;
 }
 
 bool RA_isHardcoreModeActive(void) {
