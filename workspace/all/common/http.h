@@ -82,11 +82,24 @@ void HTTP_freeResponse(HTTP_Response* response);
 char* HTTP_urlEncode(const char* str);
 
 /**
- * Build a User-Agent string for RetroAchievements.
- * Format: "NextUI/<version> (<platform>) Integration/<version>"
+ * Build a User-Agent string for RetroAchievements per the spec
+ * (see Hardcore Compliance §C). Format:
+ *   NextUI/v<NEXTUI_VERSION> (<OS> <kernel>; <platform>) [<core>/<core_ver>]
+ * The core suffix is appended only when HTTP_setCoreInfo() has been called
+ * with a non-empty core name and version.
  * @param buffer Buffer to write User-Agent string to
- * @param buffer_size Size of buffer
+ * @param buffer_size Size of buffer (256 recommended)
  */
 void HTTP_getUserAgent(char* buffer, size_t buffer_size);
+
+/**
+ * Register the loaded core's name and version so HTTP_getUserAgent() can
+ * include the optional core clause on subsequent requests. Pass NULL or
+ * empty strings to clear (e.g., on core unload). Safe to call from the
+ * main thread; reads from HTTP worker threads tolerate the race.
+ * @param name Core library name (e.g. "Snes9x"); NULL/"" to clear
+ * @param version Core library version (e.g. "1.62.3"); NULL/"" to clear
+ */
+void HTTP_setCoreInfo(const char* name, const char* version);
 
 #endif // __HTTP_H__

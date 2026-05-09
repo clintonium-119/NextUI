@@ -18,6 +18,13 @@ endif
 ###########################################################
 
 BUILD_HASH:=$(shell git rev-parse --short HEAD)
+NEXTUI_VERSION:=$(shell cat VERSION 2>/dev/null || echo 0.0.0)
+# Validate version is dotted three-segment (e.g. 6.12.0) so the RA UA stays
+# compliant. (Make's $(filter) only treats the first % as wildcard, so we
+# can't pattern-match this; count segments instead.)
+ifneq ($(words $(subst ., ,$(NEXTUI_VERSION))),3)
+  $(error VERSION file must contain a dotted three-segment version (e.g. 6.12.0); got '$(NEXTUI_VERSION)')
+endif
 BUILD_BRANCH:=$(shell (git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD) | sed 's/\//-/g')
 RELEASE_TIME:=$(shell TZ=GMT date +%Y%m%d)
 ifeq ($(BUILD_BRANCH),main)
@@ -194,6 +201,7 @@ setup: name
 	cd ./build && find . -type f -name '.keep' -delete
 	cd ./build && find . -type f -name '*.meta' -delete
 	echo $(BUILD_HASH) > ./workspace/hash.txt
+	echo $(NEXTUI_VERSION) > ./workspace/version.txt
 	
 	# copy readmes to workspace so we can use Linux fmt instead of host's
 	mkdir -p ./workspace/readmes

@@ -6,6 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <sys/utsname.h>
 
 // SDL is used here only for threading (SDL_CreateThread/SDL_DetachThread)
 // to run HTTP requests asynchronously without blocking the main loop.
@@ -16,9 +17,58 @@
 #ifndef BUILD_HASH
 #define BUILD_HASH "dev"
 #endif
+#ifndef NEXTUI_VERSION
+#define NEXTUI_VERSION "0.0.0"
+#endif
+#ifndef PLATFORM
+#define PLATFORM "unknown"
+#endif
 
-// User agent string
-#define HTTP_USER_AGENT_FMT "NextUI/%s (%s)"
+// User-Agent format per RetroAchievements Hardcore Compliance §C:
+//   EmulatorName/v<numeric> (OSName <numeric>) core_name/<version>
+// Examples we emit:
+//   NextUI/v6.12.0 (Linux 6.6; tg5040)              — no core loaded
+//   NextUI/v6.12.0 (Linux 6.6; tg5040) snes9x/1.62.3 — in-game
+// The trailing "; <platform>" sub-clause preserves NextUI's existing
+// platform diagnostic without claiming the device profile is the OS.
+
+// Loaded core info, set by HTTP_setCoreInfo() when minarch loads/unloads a
+// core. NULL/empty when no core is active (idle UA, login from settings.elf).
+// Race-tolerant: HTTP_setCoreInfo is called from minarch's main thread when
+// a core swaps; HTTP_getUserAgent reads from worker threads. Worst case:
+// one in-flight request sees a partial write — still a valid string due
+// to bounded snprintf/strncpy and explicit null termination.
+static char nextui_core_name[64] = {0};
+static char nextui_core_version[64] = {0};
+
+// Cached OS clause ("Linux 6.6; tg5040"). Resolved lazily on first use
+// since uname() is a syscall and the kernel version is constant per boot.
+static char http_os_clause_cache[128] = {0};
+
+static const char* http_get_os_clause(void) {
+	if (http_os_clause_cache[0]) return http_os_clause_cache;
+
+	const char* sysname = "Linux";
+	char release[64] = "unknown";
+	struct utsname u;
+	if (uname(&u) == 0) {
+		if (u.sysname[0]) sysname = u.sysname;
+		// Trim release at the first non-numeric/dot char so e.g.
+		// "6.6.0-arch1-1" → "6.6.0". Keeps the OS-version segment
+		// numeric per RA spec §C examples.
+		size_t i = 0;
+		while (i < sizeof(release) - 1 && u.release[i] &&
+		       (isdigit((unsigned char)u.release[i]) || u.release[i] == '.')) {
+			release[i] = u.release[i];
+			i++;
+		}
+		release[i] = '\0';
+		if (i == 0) snprintf(release, sizeof(release), "unknown");
+	}
+	snprintf(http_os_clause_cache, sizeof(http_os_clause_cache),
+	         "%s %s; %s", sysname, release, PLATFORM);
+	return http_os_clause_cache;
+}
 
 /*****************************************************************************
  * Internal helpers
@@ -392,5 +442,28 @@ char* HTTP_urlEncode(const char* str) {
 }
 
 void HTTP_getUserAgent(char* buffer, size_t buffer_size) {
-	snprintf(buffer, buffer_size, HTTP_USER_AGENT_FMT, BUILD_HASH, PLATFORM);
+	const char* os_clause = http_get_os_clause();
+	if (nextui_core_name[0] && nextui_core_version[0]) {
+		snprintf(buffer, buffer_size, "NextUI/v%s (%s) %s/%s",
+		         NEXTUI_VERSION, os_clause,
+		         nextui_core_name, nextui_core_version);
+	} else {
+		snprintf(buffer, buffer_size, "NextUI/v%s (%s)",
+		         NEXTUI_VERSION, os_clause);
+	}
+}
+
+void HTTP_setCoreInfo(const char* name, const char* version) {
+	if (name && name[0]) {
+		strncpy(nextui_core_name, name, sizeof(nextui_core_name) - 1);
+		nextui_core_name[sizeof(nextui_core_name) - 1] = '\0';
+	} else {
+		nextui_core_name[0] = '\0';
+	}
+	if (version && version[0]) {
+		strncpy(nextui_core_version, version, sizeof(nextui_core_version) - 1);
+		nextui_core_version[sizeof(nextui_core_version) - 1] = '\0';
+	} else {
+		nextui_core_version[0] = '\0';
+	}
 }

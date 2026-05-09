@@ -30,6 +30,7 @@
 #include "config.h"
 #include "ra_integration.h"
 #include "ra_badges.h"
+#include "http.h"
 #include <dirent.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL.h>
@@ -6109,7 +6110,10 @@ void Core_open(const char* core_path, const char* tag_name) {
 	
 	struct retro_system_info info = {};
 	core.get_system_info(&info);
-	
+
+	// Register core info for the RA-compliant User-Agent (Hardcore §C).
+	HTTP_setCoreInfo(info.library_name, info.library_version);
+
 
 	LOG_info("Block Extract: %d\n", info.block_extract);
 
@@ -6252,6 +6256,8 @@ void Core_quit(void) {
 		core.unload_game();
 		core.deinit();
 		core.initialized = 0;
+		// Clear core clause from User-Agent now that no core is loaded.
+		HTTP_setCoreInfo(NULL, NULL);
 	}
 }
 void Core_close(void) {
@@ -7820,7 +7826,7 @@ static int OptionAchievements_openMenu(MenuList* list, int i) {
 static MenuList options_menu = {
 	.type = MENU_LIST,
 	.items = (MenuItem[]) {
-		{"Frontend", "NextUI (" BUILD_DATE " " BUILD_HASH ")",.on_confirm=OptionFrontend_openMenu},
+		{"Frontend", "NextUI v" NEXTUI_VERSION " (" BUILD_DATE " " BUILD_HASH ")",.on_confirm=OptionFrontend_openMenu},
 		{"Emulator",.on_confirm=OptionEmulator_openMenu},
 		{"Shaders",.on_confirm=OptionShaders_openMenu},
 		{"Cheats",.on_confirm=OptionCheats_openMenu},

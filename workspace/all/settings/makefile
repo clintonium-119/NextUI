@@ -29,6 +29,8 @@ CC = $(CROSS_COMPILE)gcc
 CXX = $(CROSS_COMPILE)g++
 CFLAGS += $(OPT)
 CFLAGS += $(INCDIR) -DPLATFORM=\"$(PLATFORM)\"
+NEXTUI_VERSION!=cat ../../version.txt 2>/dev/null || echo 0.0.0
+CFLAGS += -DNEXTUI_VERSION=\"${NEXTUI_VERSION}\"
 CXXFLAGS += $(CFLAGS) -std=c++17
 CFLAGS += -fpermissive
 LDFLAGS +=  -lmsettings -lcrypto

@@ -89,7 +89,8 @@ ARFLAGS=rc
 
 BUILD_DATE!=date +%Y.%m.%d
 BUILD_HASH!=cat ../../hash.txt
-CFLAGS += -DBUILD_DATE=\"${BUILD_DATE}\" -DBUILD_HASH=\"${BUILD_HASH}\"
+NEXTUI_VERSION!=cat ../../version.txt 2>/dev/null || echo 0.0.0
+CFLAGS += -DBUILD_DATE=\"${BUILD_DATE}\" -DBUILD_HASH=\"${BUILD_HASH}\" -DNEXTUI_VERSION=\"${NEXTUI_VERSION}\"
 
 ifeq ($(PLATFORM), desktop)
 all: clean libretro-common rcheevos libchdr $(PREFIX_LOCAL)/include/msettings.h
