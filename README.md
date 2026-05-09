@@ -108,6 +108,21 @@ After two minutes the device will go into deep sleep. The leds will turn complet
 
 ---
 
+## RetroAchievements
+
+NextUI ships a built-in [RetroAchievements](https://retroachievements.org/)
+integration with hardcore-mode support. Documentation:
+
+- [Privacy policy](docs/retroachievements/PRIVACY.md) — what data is
+  stored on your SD card, what is sent to RetroAchievements' servers,
+  and your rights as a user.
+- [Monetization policy](docs/retroachievements/MONETIZATION.md) —
+  short version: NextUI is fully free, no paid features.
+- [Third-party licenses](docs/retroachievements/LICENSES.md) — every
+  emulation core and library shipped, with upstream URLs.
+
+---
+
 ## What about X feature?
 
 NextUI supports a variety of optional extras called Paks that are maintained by community members.
