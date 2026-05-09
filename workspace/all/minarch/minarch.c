@@ -7635,9 +7635,15 @@ static int OptionAchievements_openMenu(MenuList* list, int i) {
 			int selected_row = selected - start;
 			int opt_pad = SCALE1(8);  // Local option padding since OPTION_PADDING defined later
 
-			// Status text at top, aligned with hardware pill (not part of centered content)
+			// Status text at top, aligned with hardware pill (not part of centered content).
+			// RA Hardcore Compliance §E: append mode tag so the achievement list
+			// reflects current state.
 			char status_text[64];
-			snprintf(status_text, sizeof(status_text), "%u/%u unlocked", unlocked, total);
+			if (RA_isHardcoreModeActive()) {
+				snprintf(status_text, sizeof(status_text), "%u/%u unlocked · Hardcore", unlocked, total);
+			} else {
+				snprintf(status_text, sizeof(status_text), "%u/%u unlocked", unlocked, total);
+			}
 			SDL_Surface* status_surface = TTF_RenderUTF8_Blended(font.tiny, status_text, COLOR_WHITE);
 			SDL_BlitSurface(status_surface, NULL, screen, &(SDL_Rect){
 				(screen->w - status_surface->w) / 2,
@@ -7854,16 +7860,21 @@ static void OptionSaveChanges_updateDesc(void) {
 	options_menu.items[save_changes_index].desc = getSaveDesc();
 }
 
-// Update the Achievements menu item to show count (only when RA enabled)
+// Update the Achievements menu item to show count (only when RA enabled).
+// Appends " · Hardcore" suffix when hardcore is active so the pause-menu
+// row reflects current mode without opening the achievement list.
 static char ach_desc_buffer[64] = {0};
 static void OptionAchievements_updateDesc(void) {
 	if (!CFG_getRAEnable()) return;
-	
+
+	const char* mode_tag = RA_isHardcoreModeActive() ? " · Hardcore" : "";
+
 	if (RA_isGameLoaded()) {
 		uint32_t unlocked, total;
 		RA_getAchievementSummary(&unlocked, &total);
 		if (total > 0) {
-			snprintf(ach_desc_buffer, sizeof(ach_desc_buffer), "%u / %u unlocked", unlocked, total);
+			snprintf(ach_desc_buffer, sizeof(ach_desc_buffer),
+			         "%u / %u unlocked%s", unlocked, total, mode_tag);
 			options_menu.items[6].desc = ach_desc_buffer;
 			return;
 		}

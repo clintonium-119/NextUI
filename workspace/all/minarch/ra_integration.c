@@ -920,8 +920,16 @@ static void ra_show_game_summary(rc_client_t* client, const rc_client_game_t* ga
 	}
 	
 	char message[NOTIFICATION_MAX_MESSAGE];
-	snprintf(message, sizeof(message), "%s - %u/%u achievements",
-	         game->title, display_unlocked, display_total);
+	/* Spec (RA Hardcore Compliance §E): hardcore state must be visibly
+	 * indicated during play; "normally done when the player starts a game
+	 * — they can see a brief informational message saying what mode
+	 * they're in." Append the mode tag to the existing game-summary
+	 * notification so we satisfy the requirement without an always-on
+	 * HUD overlay. */
+	const char* mode_tag = rc_client_get_hardcore_enabled(client)
+	                       ? " · Hardcore" : " · Softcore";
+	snprintf(message, sizeof(message), "%s - %u/%u achievements%s",
+	         game->title, display_unlocked, display_total, mode_tag);
 	Notification_push(NOTIFICATION_ACHIEVEMENT, message, NULL);
 }
 
