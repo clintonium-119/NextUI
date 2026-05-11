@@ -304,12 +304,18 @@ void RA_Offline_clearPendingCache(void);
  * No-op if the cache file is absent, corrupt, or already contains the
  * achievement. Thread-safe: read-modify-write serialized by ra_cache_mutex.
  *
+ * Inject into "Unlocks" always; also inject into "HardcoreUnlocks" iff the
+ * server-confirmed unlock was earned in hardcore mode (a hardcore unlock
+ * implies the softcore unlock per RA conventions).
+ *
  * @param game_hash      Game hash (used to locate startsession_<hash>.bin)
  * @param achievement_id Achievement ID to inject
  * @param timestamp      Unix timestamp for the "When" field
+ * @param hardcore       Non-zero if the unlock was earned in hardcore mode
  */
 void RA_Offline_patchStartsessionCacheWithUnlock(const char* game_hash,
                                                   uint32_t achievement_id,
-                                                  uint32_t timestamp);
+                                                  uint32_t timestamp,
+                                                  uint8_t hardcore);
 
 #endif /* RA_OFFLINE_H */

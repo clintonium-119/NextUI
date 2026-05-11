@@ -64,6 +64,16 @@ bool RA_isGameLoaded(void);
 bool RA_isHardcoreModeActive(void);
 
 /**
+ * Decide whether an achievement should render in its "unlocked" (color) state
+ * for the *current* gameplay mode. In hardcore, a softcore-only unlock should
+ * still appear locked (grayscale); in softcore, any unlock counts.
+ * @param achievement rc_client_achievement_t pointer (untyped to avoid header
+ *        dep); the function reads its `unlocked` bitfield.
+ * @return true if the badge should be shown in color
+ */
+bool RA_isAchievementUnlockedForDisplay(const void* achievement);
+
+/**
  * Check if the user is logged in.
  * @return true if logged in
  */

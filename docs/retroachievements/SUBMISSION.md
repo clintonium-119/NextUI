@@ -121,13 +121,75 @@ references for reviewers who wish to audit the source.
 - Toggling is a write to `minui.cfg`. Because the Settings app is a
   separate process and no game can be loaded while it is open, no
   mid-session transitions originate from the user-facing toggle.
-- Mid-session transitions occur only on **reconnect after offline
-  play**: when the device regains network access while a game is
-  loaded with the user's persisted hardcore preference set, NextUI
-  invokes `Hardcore_onEnableTransition()` which clears all cheat
-  enabled flags, calls `core.cheat_reset()`, frees the rewind buffer,
-  and calls `core.reset()`. The user sees a notification that hardcore
-  mode is now active and the game has been reset.
+- Mid-session transitions occur only when **softcore is elevated to
+  hardcore on the first successful network connection after a
+  cold-boot in offline mode**: a hardcore-preferring user who boots
+  the device with no network is started in softcore (per spec §B —
+  "online required to start a hardcore session"), and the elevation
+  only takes effect once connectivity is established. At that point
+  NextUI invokes `Hardcore_onEnableTransition()` which clears all
+  cheat enabled flags, calls `core.cheat_reset()`, frees the rewind
+  buffer, and calls `core.reset()`. The user sees a notification that
+  hardcore mode is now active and the game has been reset.
+
+### Connectivity loss during an active hardcore session
+
+NextUI follows the rcheevos reference design: a transient network drop
+during a hardcore session **does not** demote the session to softcore.
+- `rc_client_set_hardcore_enabled` is **not** flipped on
+  `RC_CLIENT_EVENT_DISCONNECTED`. The user remains in hardcore.
+- Unlocks earned during the drop are written to the offline ledger
+  (`Saves/.userdata/[platform]/.ra/offline/ledger.bin`) with the
+  hardcore flag set, durable across crashes and reboots.
+- The existing in-flight gate in `ra_server_call` suppresses rcheevos'
+  own in-memory retry queue while the ledger holds the entry,
+  preventing double submission.
+- On `RC_CLIENT_EVENT_RECONNECTED` NextUI does **not** reset the game;
+  it simply clears offline state and starts the sync engine, which
+  POSTs each queued unlock to `r=awardachievement` with the original
+  `h=1` flag and an `o=<seconds_since>` offset reflecting the original
+  unlock timestamp. The server's response — `SYNC_ACK` in our ledger —
+  clears the entry from the pending cache and patches the
+  `startsession` cache for the next launch.
+- **Cross-session demotion.** RA's offline contract is explicit:
+  *"if you close the emulator before you get internet back then your
+  achievements won't sync, and if you close the emulator and later
+  reopen it, it will NOT unlock those achievements for you once
+  connected again."* NextUI honours this for hardcore credit
+  specifically. Pending unlocks whose ledger timestamp predates the
+  current session's `SESSION_START` (recorded via
+  `RA_Sync_setCurrentSessionStart` on game load) are submitted with
+  `h=0` regardless of their original record. The user is notified
+  (two sequential toasts: `"N Hardcore unlock(s) synced as Softcore"`
+  followed by `"Request manual unlock for Hardcore credit"`) and
+  directed to RetroAchievements to recover hardcore credit through
+  the site's manual-unlock process. The ledger record itself keeps
+  `hardcore=1` for audit fidelity. This matches the existing
+  quick-resume rule ("resumed session must drop to Softcore")
+  generalised to all session boundaries.
+- **Settings.pak sync path.** The standalone Settings app (Tools →
+  Settings → RetroAchievements → Sync Offline Unlocks) runs as a
+  separate process from minarch and never registers a SESSION_START.
+  By the rule above this means every successful hardcore unlock
+  submitted from Settings.pak is cross-session by definition and is
+  demoted to softcore — followed by a dismissable overlay directing
+  the user to contact RetroAchievements for a manual unlock if they
+  want hardcore credit reinstated. This is intentional: any hardcore
+  unlock reaching the Settings.pak sync UI was earned in a prior
+  minarch process that didn't sync before exit, exactly the scenario
+  RA's FAQ disallows for automatic hardcore credit.
+- Rationale: save-state load is already blocked in hardcore regardless
+  of connection state, so a wifi drop cannot be used to cheese
+  hardcore. Forcing softcore on every blip would silently downgrade
+  diligent hardcore players on flaky WiFi (the realistic case on
+  handhelds), which is the worse failure mode. This mirrors the
+  intentional RetroArch behaviour (see
+  [libretro/RetroArch#15574](https://github.com/libretro/RetroArch/issues/15574)).
+- The user sees an `"Offline — unlocks will sync on reconnect"`
+  notification on the first drop of a session, and a
+  `"Reconnected — syncing pending unlocks"` notification when the
+  network returns (only if the drop notification was shown, so brief
+  blips are silent).
 - Visible mode indication on every game start: the existing
   `ra_show_game_summary` notification is appended with
   `· Hardcore` or `· Softcore` per spec §C ("normally done when the
@@ -197,11 +259,33 @@ seconds:
    notification.
 6. **Quick-resume cleared:** in hardcore, Save & Quit a game; relaunch
    it — show that it boots from the ROM start, not a saved state.
-7. **Reconnect transition:** start in offline (hardcore preference set,
-   client offline → softcore active); reconnect → show notification +
-   game reset.
-8. **An actual hardcore unlock** appearing on retroachievements.org for
-   the test account.
+7. **Cold-boot offline elevation:** boot the device with WiFi off
+   while hardcore preference is set; observe the game starts in
+   softcore. Enable WiFi → first reconnect triggers elevation +
+   `core.reset()` + the "Reconnected — Hardcore mode ON (game reset)"
+   notification.
+8. **Mid-session drop in hardcore (within-session sync):** start a
+   hardcore session online, disable WiFi mid-play, earn an achievement
+   during the offline window, re-enable WiFi **without exiting the
+   game**. Expected: "Offline — unlocks will sync on reconnect"
+   notification on drop; achievement appears in the achievement list
+   with the "Pending sync" indicator; on reconnect, "Reconnected —
+   syncing pending unlocks" notification and the unlock appears on
+   retroachievements.org as a **hardcore** unlock with the correct
+   original timestamp.
+9. **Cross-session demotion (hardcore → softcore):** repeat step 8 but
+   *exit the game* (or kill the app, or reboot the device) before
+   reconnecting. Reopen the game with WiFi available. Expected: sync
+   engine submits the pending unlock as **softcore**, the user sees
+   the two demotion toasts ("N Hardcore unlock(s) synced as Softcore"
+   followed by "Request manual unlock for Hardcore credit"), and the
+   achievement appears on retroachievements.org as a softcore unlock.
+   Repeat once via Tools → Settings → RetroAchievements → Sync
+   Offline Unlocks instead of re-entering the game; expected: same
+   outcome, plus the Settings overlay directing the user to contact
+   RetroAchievements for a manual unlock.
+10. **An actual hardcore unlock** appearing on retroachievements.org
+    for the test account.
 
 ---
 

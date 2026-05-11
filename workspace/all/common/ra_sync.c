@@ -35,6 +35,23 @@
 /* Default config used when NULL is passed */
 static const RA_SyncConfig sync_default_config = RA_SYNC_CONFIG_INTERACTIVE;
 
+/*
+ * Current gameplay session's SESSION_START unix timestamp, or 0 if no
+ * session has been registered in this process (e.g. Settings.pak, or
+ * minarch before a game is loaded). Hardcore unlocks with a ledger
+ * timestamp predating this value crossed a session boundary and must
+ * be demoted to softcore before submission — see RA_SyncResult.demoted
+ * and the docstring on RA_Sync_setCurrentSessionStart. Plain assignment
+ * is sufficient: written only by the main thread on game load/unload,
+ * read by the sync thread which is launched after writes settle.
+ */
+static uint32_t ra_current_session_start_ts = 0;
+
+void RA_Sync_setCurrentSessionStart(uint32_t session_start_ts) {
+	ra_current_session_start_ts = session_start_ts;
+	RA_LOG_DEBUG("Current session start ts = %u\n", session_start_ts);
+}
+
 /*****************************************************************************
  * Internal helpers
  *****************************************************************************/
@@ -196,7 +213,7 @@ RA_SyncResult RA_Sync_syncAll(uint32_t game_id,
                               SDL_atomic_t* cancel,
                               RA_SyncProgressCallback progress_cb,
                               void* userdata) {
-	RA_SyncResult result = {0, 0, 0, 0};
+	RA_SyncResult result = {0, 0, 0, 0, 0};
 
 	sync_ensure_init();
 
@@ -259,15 +276,6 @@ RA_SyncResult RA_Sync_syncAll(uint32_t game_id,
 
 		RA_PendingUnlock* unlock = &unlocks[i];
 
-		/* Skip hardcore (should already be filtered, but be safe) */
-		if (unlock->hardcore) {
-			result.skipped++;
-			if (progress_cb) {
-				progress_cb(i + 1, count, false, userdata);
-			}
-			continue;
-		}
-
 		/* Compute seconds since unlock */
 		time_t now = time(NULL);
 		uint32_t seconds_since = 0;
@@ -275,15 +283,37 @@ RA_SyncResult RA_Sync_syncAll(uint32_t game_id,
 			seconds_since = (uint32_t)(now - (time_t)unlock->timestamp);
 		}
 
+		/* Cross-session demotion: a hardcore unlock whose ledger timestamp
+		 * predates the current session's SESSION_START crossed a process or
+		 * game-load boundary. Per RA's offline contract, hardcore credit
+		 * cannot accrue across that boundary — submit as softcore instead.
+		 * A session marker of 0 (Settings.pak, or minarch before game load)
+		 * means "no session in this process," which by definition makes
+		 * every pending unlock cross-session. */
+		uint8_t submit_hardcore = unlock->hardcore;
+		bool demoted_here = false;
+		if (unlock->hardcore &&
+		    (ra_current_session_start_ts == 0 ||
+		     unlock->timestamp < ra_current_session_start_ts)) {
+			submit_hardcore = 0;
+			demoted_here = true;
+			RA_LOG_INFO("ach=%u: demoting hardcore→softcore "
+			            "(unlock_ts=%u, session_start_ts=%u) — cross-session\n",
+			            unlock->achievement_id, unlock->timestamp,
+			            ra_current_session_start_ts);
+		}
+
 		/* Log timing details at debug level for diagnosing clock drift. */
-		RA_LOG_DEBUG("ach=%u: ledger_timestamp=%u time_now=%lld seconds_since=%u\n",
+		RA_LOG_DEBUG("ach=%u: ledger_timestamp=%u time_now=%lld seconds_since=%u "
+		              "submit_hardcore=%u (record_hardcore=%u)\n",
 		              unlock->achievement_id, unlock->timestamp,
-		              (long long)now, seconds_since);
+		              (long long)now, seconds_since,
+		              submit_hardcore, unlock->hardcore);
 
 		/* Build request */
 		char* post_data = sync_build_post_data(username, token,
 		                                       unlock->achievement_id,
-		                                       0, /* softcore */
+		                                       submit_hardcore,
 		                                       unlock->game_hash,
 		                                       seconds_since);
 		if (!post_data) {
@@ -332,14 +362,21 @@ RA_SyncResult RA_Sync_syncAll(uint32_t game_id,
 
 		if (parse_result == 1) {
 			/* Success — write SYNC_ACK to ledger */
-			RA_LOG_DEBUG("ach=%u: server accepted (seconds_since=%u)\n",
-			              unlock->achievement_id, seconds_since);
+			RA_LOG_DEBUG("ach=%u: server accepted (seconds_since=%u, "
+			              "submit_hardcore=%u)\n",
+			              unlock->achievement_id, seconds_since, submit_hardcore);
 			RA_Offline_ledgerWriteSyncAck(unlock->achievement_id, unlock->game_id);
 			/* Patch cached startsession to include this unlock so the next
-			   offline-first launch doesn't re-trigger it */
+			   offline-first launch doesn't re-trigger it. Use submit_hardcore
+			   (not record_hardcore) so a demoted unlock patches only the
+			   softcore Unlocks array and not HardcoreUnlocks. */
 			RA_Offline_patchStartsessionCacheWithUnlock(
-				unlock->game_hash, unlock->achievement_id, unlock->timestamp);
+				unlock->game_hash, unlock->achievement_id, unlock->timestamp,
+				submit_hardcore);
 			result.synced++;
+			if (demoted_here) {
+				result.demoted++;
+			}
 		} else if (parse_result == 0) {
 			/* Server rejected — skip and continue */
 			RA_LOG_WARN("ach=%u: server rejected\n", unlock->achievement_id);

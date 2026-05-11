@@ -72,6 +72,13 @@ LDFLAGS += -Wl,-rpath,'$$ORIGIN'
 endif
 endif
 
+# RA developer/test build: spectator mode (suppresses unlock + leaderboard
+# submissions to the server while keeping local notifications). Opt in with
+# `make ... RA_SPECTATOR_MODE=1`. Never ship a release built with this flag.
+ifeq ($(RA_SPECTATOR_MODE), 1)
+CFLAGS += -DRA_SPECTATOR_MODE=1
+endif
+
 # Sanitizers
 ifeq ($(PLATFORM), desktop)
 ifeq ($(TSAN), 1)

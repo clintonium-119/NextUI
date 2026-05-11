@@ -7292,7 +7292,7 @@ static int OptionAchievements_showDetail(MenuList* list, int i) {
 			int center_x = screen->w / 2;
 			
 			// Badge icon centered at top
-			SDL_Surface* badge = RA_Badges_get(ach->badge_name, !ach->unlocked);
+			SDL_Surface* badge = RA_Badges_get(ach->badge_name, !RA_isAchievementUnlockedForDisplay(ach));
 			if (badge) {
 				SDL_Rect badge_src = {0, 0, badge->w, badge->h};
 				SDL_Rect badge_dst = {
@@ -7349,9 +7349,10 @@ static int OptionAchievements_showDetail(MenuList* list, int i) {
 				SDL_FreeSurface(progress_text);
 			}
 			
-			// Offline pending indicator
+			// Pending-sync indicator: server hasn't confirmed yet (offline cache
+			// or transient drop during hardcore — both paths land here)
 			if (is_offline_pending) {
-				SDL_Surface* offline_text = TTF_RenderUTF8_Blended(font.tiny, "Unlocked offline - pending sync", COLOR_LIGHT_TEXT);
+				SDL_Surface* offline_text = TTF_RenderUTF8_Blended(font.tiny, "Pending sync", COLOR_LIGHT_TEXT);
 				int wifi_size = SCALE1(12);
 				int total_w = wifi_size + SCALE1(4) + offline_text->w;
 				int icon_x = center_x - total_w / 2;
@@ -7714,7 +7715,7 @@ static int OptionAchievements_openMenu(MenuList* list, int i) {
 					text_color = uintToColour(THEME_COLOR5_255);
 
 					// Badge icon inside the white pill
-					SDL_Surface* badge = RA_Badges_get(ach->badge_name, !ach->unlocked);
+					SDL_Surface* badge = RA_Badges_get(ach->badge_name, !RA_isAchievementUnlockedForDisplay(ach));
 					if (badge) {
 						SDL_Rect badge_src = {0, 0, badge->w, badge->h};
 						SDL_Rect badge_dst = {
@@ -7758,7 +7759,7 @@ static int OptionAchievements_openMenu(MenuList* list, int i) {
 					int badge_display_size = SCALE1(BUTTON_SIZE - 4);
 					
 					// Badge icon
-					SDL_Surface* badge = RA_Badges_get(ach->badge_name, !ach->unlocked);
+					SDL_Surface* badge = RA_Badges_get(ach->badge_name, !RA_isAchievementUnlockedForDisplay(ach));
 					if (badge) {
 						SDL_Rect badge_src = {0, 0, badge->w, badge->h};
 						SDL_Rect badge_dst = {
@@ -7873,7 +7874,11 @@ static char ach_desc_buffer[64] = {0};
 static void OptionAchievements_updateDesc(void) {
 	if (!CFG_getRAEnable()) return;
 
+#if defined(RA_SPECTATOR_MODE) && RA_SPECTATOR_MODE
+	const char* mode_tag = RA_isHardcoreModeActive() ? " · Hardcore (Spectator)" : " · Spectator";
+#else
 	const char* mode_tag = RA_isHardcoreModeActive() ? " · Hardcore" : "";
+#endif
 
 	if (RA_isGameLoaded()) {
 		uint32_t unlocked, total;

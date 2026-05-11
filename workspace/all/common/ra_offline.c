@@ -834,16 +834,9 @@ void RA_Offline_ledgerWriteUnlock(uint32_t game_id, uint32_t achievement_id,
                                   const char* game_hash, uint8_t hardcore) {
 	if (!SDL_AtomicGet(&ra_offline_initialized)) return;
 
-	/* Hardcore unlocks are never written to the offline ledger — they cannot
-	 * be synced retroactively and would persist forever after compaction. */
-	if (hardcore) {
-		RA_LOG_DEBUG("Ledger: skipping hardcore UNLOCK achievement=%u game=%u\n",
-		                  achievement_id, game_id);
-		return;
-	}
-
 	RA_LedgerRecord rec;
-	ledger_record_init(&rec, RA_LEDGER_ACHIEVEMENT_UNLOCK, game_id, achievement_id, 0, game_hash);
+	ledger_record_init(&rec, RA_LEDGER_ACHIEVEMENT_UNLOCK, game_id, achievement_id,
+	                   hardcore ? 1 : 0, game_hash);
 
 	if (ledger_append(&rec)) {
 		RA_LOG_INFO("Ledger: UNLOCK achievement=%u game=%u timestamp=%u\n",
@@ -942,7 +935,7 @@ static bool ledger_read_pending_records(RA_LedgerRecord** out_records,
 		}
 	}
 
-	/* Collect pending softcore UNLOCK records */
+	/* Collect pending UNLOCK records (both softcore and hardcore) */
 	RA_LedgerRecord* pending = (RA_LedgerRecord*)malloc(total_records * sizeof(RA_LedgerRecord));
 	if (!pending) {
 		free(cancelled);
@@ -953,7 +946,6 @@ static bool ledger_read_pending_records(RA_LedgerRecord** out_records,
 	uint32_t pending_count = 0;
 	for (uint32_t i = 0; i < total_records; i++) {
 		if (records[i].type == RA_LEDGER_ACHIEVEMENT_UNLOCK &&
-		    records[i].hardcore == 0 &&
 		    !cancelled[i]) {
 			pending[pending_count++] = records[i];
 		}
@@ -1092,7 +1084,7 @@ bool RA_Offline_ledgerGetPendingUnlocks(RA_PendingUnlock** out_unlocks,
 		unlocks[i].achievement_id = records[i].achievement_id;
 		unlocks[i].game_id = records[i].game_id;
 		unlocks[i].timestamp = records[i].timestamp;
-		unlocks[i].hardcore = 0;
+		unlocks[i].hardcore = records[i].hardcore;
 		memcpy(unlocks[i].game_hash, records[i].game_hash, sizeof(records[i].game_hash));
 	}
 	free(records);
@@ -1430,7 +1422,8 @@ void RA_Offline_clearPendingCache(void) {
 
 void RA_Offline_patchStartsessionCacheWithUnlock(const char* game_hash,
                                                   uint32_t achievement_id,
-                                                  uint32_t timestamp) {
+                                                  uint32_t timestamp,
+                                                  uint8_t hardcore) {
 	if (!SDL_AtomicGet(&ra_offline_initialized) || !game_hash || game_hash[0] == '\0') return;
 
 	/* Serialize the entire read-modify-write to prevent lost updates when
@@ -1499,8 +1492,13 @@ void RA_Offline_patchStartsessionCacheWithUnlock(const char* game_hash,
 		}
 	}
 
-	if (already_in_softcore && already_in_hardcore) {
-		/* Already present in both arrays — no-op */
+	/* A hardcore unlock implies the softcore unlock too (RA convention);
+	 * a softcore unlock must NOT be injected into HardcoreUnlocks or the
+	 * client would believe the achievement was earned in hardcore. */
+	bool need_softcore_inject = !already_in_softcore;
+	bool need_hardcore_inject = hardcore && !already_in_hardcore;
+
+	if (!need_softcore_inject && !need_hardcore_inject) {
 		free(body);
 		goto done;
 	}
@@ -1513,7 +1511,7 @@ void RA_Offline_patchStartsessionCacheWithUnlock(const char* game_hash,
 	single.achievement_id = achievement_id;
 	single.timestamp = timestamp;
 	single.game_id = 0;
-	single.hardcore = 0;
+	single.hardcore = hardcore;
 	/* game_hash filter: use empty string so the filter is bypassed
 	 * (inject_unlocks_into_array skips entries where game_hash doesn't match,
 	 *  but if we pass NULL as game_hash it accepts all entries). */
@@ -1523,8 +1521,7 @@ void RA_Offline_patchStartsessionCacheWithUnlock(const char* game_hash,
 	size_t current_len = body_len;
 	bool body_replaced = false;
 
-	/* Inject into "Unlocks" if not already present */
-	if (!already_in_softcore) {
+	if (need_softcore_inject) {
 		char* new_body = NULL;
 		size_t new_len = 0;
 		uint32_t injected = inject_unlocks_into_array(
@@ -1539,8 +1536,7 @@ void RA_Offline_patchStartsessionCacheWithUnlock(const char* game_hash,
 		}
 	}
 
-	/* Inject into "HardcoreUnlocks" if not already present */
-	if (!already_in_hardcore) {
+	if (need_hardcore_inject) {
 		char* new_body = NULL;
 		size_t new_len = 0;
 		uint32_t injected = inject_unlocks_into_array(

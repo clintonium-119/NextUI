@@ -990,27 +990,31 @@ static void ra_http_callback(HTTP_Response* response, void* userdata) {
 						// skip the cache patch entirely — the sync engine already
 						// patched the cache with the correct timestamp.
 						uint32_t unlock_timestamp = 0;  // 0 = "not found"
+						uint8_t unlock_hardcore = 0;
 						bool found_in_ledger = false;
 						{
 							RA_PendingUnlock entry;
 							if (RA_Offline_ledgerFindPendingUnlock(ach_id, &entry)) {
 								unlock_timestamp = entry.timestamp;
+								unlock_hardcore = entry.hardcore;
 								found_in_ledger = true;
 								RA_LOG_DEBUG("[AWARD_HTTP] ach=%u: found in ledger, "
-								            "timestamp=%u\n", ach_id, unlock_timestamp);
+								            "timestamp=%u hardcore=%u\n",
+								            ach_id, unlock_timestamp, unlock_hardcore);
 							}
 						}
-						
+
 						RA_Offline_ledgerWriteSyncAck(ach_id, 0);
 						RA_Offline_removePendingCacheEntry(ach_id);
-						
+
 						if (found_in_ledger && unlock_timestamp > 0) {
 							// Ledger entry found — patch the startsession cache
 							// with the correct original unlock timestamp.
 							RA_LOG_DEBUG("[AWARD_HTTP] ach=%u: patching startsession cache "
-							            "with ledger timestamp=%u\n", ach_id, unlock_timestamp);
+							            "with ledger timestamp=%u hardcore=%u\n",
+							            ach_id, unlock_timestamp, unlock_hardcore);
 							RA_Offline_patchStartsessionCacheWithUnlock(
-								data->game_hash, ach_id, unlock_timestamp);
+								data->game_hash, ach_id, unlock_timestamp, unlock_hardcore);
 						} else {
 							// Ledger already compacted (sync engine handled it) OR
 							// this was a genuinely online unlock (no ledger entry).
@@ -1302,8 +1306,11 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 		       RA_Offline_isOffline(), RA_Offline_isSyncing(),
 		       (long long)time(NULL));
 		
-		// Write-ahead log: persist unlock to ledger (survives app crash)
-		{
+		// Write-ahead log: persist unlock to ledger (survives app crash).
+		// Skip entirely in spectator mode — rcheevos won't submit, so the
+		// ledger would queue forever and the UI would render every unlock
+		// as offline-pending.
+		if (!rc_client_get_spectator_mode_enabled(client)) {
 			const rc_client_game_t* game = rc_client_get_game_info(client);
 			if (game) {
 				RA_Offline_ledgerWriteUnlock(game->id, event->achievement->id,
@@ -1404,42 +1411,61 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 		
 	case RC_CLIENT_EVENT_DISCONNECTED:
 		RA_LOG_WARN("[CONNECTIVITY] DISCONNECTED — switching to offline mode "
-		            "(time_now=%lld)\n", (long long)time(NULL));
+		            "(hardcore=%d, time_now=%lld)\n",
+		            rc_client_get_hardcore_enabled(client) ? 1 : 0,
+		            (long long)time(NULL));
+		// Keep hardcore active across transient disconnects. Unlocks earned
+		// during the drop are persisted to the offline ledger (with the
+		// hardcore flag) and submitted by the sync engine on reconnect. The
+		// existing in-flight gate in ra_server_call suppresses rcheevos'
+		// own retry queue once the ledger has the entry, preventing double
+		// submission. Save-state load is already blocked in hardcore
+		// regardless of connection state, so there is no cheese vector.
 		RA_Offline_setOffline(true);
-		// Force softcore when offline
-		rc_client_set_hardcore_enabled(client, 0);
+		if (!ra_user_saw_offline && ra_game_state == GAME_LOADED) {
+			Notification_push(NOTIFICATION_ACHIEVEMENT,
+			                  "Offline — unlocks will sync on reconnect", NULL);
+		}
 		ra_user_saw_offline = true;
 		// Start probe to detect when connectivity returns
 		ra_start_connectivity_probe();
 		break;
-		
-	case RC_CLIENT_EVENT_RECONNECTED:
+
+	case RC_CLIENT_EVENT_RECONNECTED: {
 		RA_LOG_INFO("[CONNECTIVITY] RECONNECTED — switching to online mode "
-		            "(time_now=%lld)\n", (long long)time(NULL));
+		            "(hardcore=%d, time_now=%lld)\n",
+		            rc_client_get_hardcore_enabled(client) ? 1 : 0,
+		            (long long)time(NULL));
 		// Stop probe (redundant — rcheevos already confirmed connectivity)
 		ra_stop_connectivity_probe();
 		RA_Offline_setOffline(false);
-		// Re-enable hardcore if configured. Soft→hardcore mid-session
-		// requires a full game reset per RA spec; the transition callback
-		// (registered by minarch) drives core.reset() + cheat reset +
-		// rewind teardown. rc_client_reset() then clears waiting_for_reset.
-		if (CFG_getRAHardcoreMode()) {
+
+		// Only elevate to hardcore (with mandatory game reset per RA spec)
+		// when we are currently in softcore but the user prefers hardcore —
+		// e.g. cold-boot-offline forced softcore at init, and this is the
+		// first successful connection. Transient mid-session drops keep
+		// hardcore active throughout, so no reset is needed in that path.
+		bool elevate_to_hardcore = CFG_getRAHardcoreMode() &&
+		                           !rc_client_get_hardcore_enabled(client);
+		if (elevate_to_hardcore) {
 			rc_client_set_hardcore_enabled(client, 1);
-			RA_LOG_INFO("Hardcore re-enabled after reconnection\n");
+			RA_LOG_INFO("Hardcore elevated from softcore after reconnection\n");
 			if (ra_game_state == GAME_LOADED && ra_hardcore_transition_cb) {
 				ra_hardcore_transition_cb();
 			}
 			rc_client_reset(client);
-			RA_LOG_DEBUG("rc_client_reset complete (cleared waiting_for_reset)\n");
 			if (ra_game_state == GAME_LOADED) {
 				Notification_push(NOTIFICATION_ACHIEVEMENT,
-				                  "Hardcore mode ON — game reset", NULL);
+				                  "Reconnected — Hardcore mode ON (game reset)", NULL);
 			}
 			uint32_t fixed = ra_reapply_pending_unlocks(client, ra_game_hash);
 			if (fixed > 0) {
 				RA_LOG_INFO("Re-applied %u offline unlock(s) after "
-				            "reconnect hardcore re-enable\n", fixed);
+				            "hardcore elevation\n", fixed);
 			}
+		} else if (ra_user_saw_offline && ra_game_state == GAME_LOADED) {
+			Notification_push(NOTIFICATION_ACHIEVEMENT,
+			                  "Reconnected — syncing pending unlocks", NULL);
 		}
 		ra_user_saw_offline = false;
 		// Network is back — try syncing current game's ledger entries
@@ -1448,6 +1474,7 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 			ra_start_offline_sync(g ? g->id : 0);
 		}
 		break;
+	}
 		
 	default:
 		RA_LOG_DEBUG("Unhandled event type: %d\n", event->type);
@@ -1653,9 +1680,12 @@ static int ra_sync_thread_func(void* data) {
 			// Skip entries that don't match the game filter
 			if (ra_sync_game_id != 0 && pre_unlocks[i].game_id != ra_sync_game_id)
 				continue;
-			// Skip hardcore (not synced)
-			if (pre_unlocks[i].hardcore)
-				continue;
+			// (Hardcore unlocks are now synced too — within-session as
+			// hardcore, cross-session as softcore after demotion. The apply
+			// path uses rcheevos' current hardcore state to decide which
+			// bits to set; that matches reality for within-session unlocks
+			// and is harmlessly stale for cross-session ones until the
+			// next game load refreshes from the patched startsession cache.)
 			// The sync processes in order: synced entries come first,
 			// then skipped, then failed (which stops the loop).
 			// We can't distinguish synced vs skipped by position alone,
@@ -1698,6 +1728,24 @@ static int ra_sync_thread_func(void* data) {
 		} else {
 			Notification_hideProgressIndicator();
 		}
+	}
+
+	// Cross-session demotion: pending hardcore unlocks from a prior
+	// process/game session were synced as softcore, matching RA's offline
+	// contract. Notifications are capped at NOTIFICATION_MAX_MESSAGE (64
+	// bytes), so split the message into two sequential toasts — the queue
+	// (NOTIFICATION_MAX_QUEUE=4) renders them back-to-back. First states
+	// what happened, second points at the manual-unlock recovery path.
+	if (result.demoted > 0) {
+		char demote_msg[NOTIFICATION_MAX_MESSAGE];
+		snprintf(demote_msg, sizeof(demote_msg),
+		         "%u Hardcore unlock%s synced as Softcore",
+		         result.demoted, result.demoted == 1 ? "" : "s");
+		Notification_push(NOTIFICATION_ACHIEVEMENT, demote_msg, NULL);
+		Notification_push(NOTIFICATION_ACHIEVEMENT,
+		                  "Request manual unlock for Hardcore credit", NULL);
+		RA_LOG_INFO("[SYNC_THREAD] Notified user of %u demoted unlock(s)\n",
+		            result.demoted);
 	}
 	
 	// If sync failed, go back to offline mode and restart the probe
@@ -1997,10 +2045,15 @@ static void ra_game_loaded_callback(int result, const char* error_message,
 			// and filtered achievement hiding)
 			ra_show_game_summary(client, game);
 			
-			// Ledger: record session start
+			// Ledger: record session start. Capture the timestamp first so
+			// the sync engine can distinguish unlocks earned in this session
+			// (sync as hardcore if applicable) from cross-session unlocks
+			// (always demoted to softcore, per RA's offline contract).
+			uint32_t session_start_ts = (uint32_t)time(NULL);
+			RA_Sync_setCurrentSessionStart(session_start_ts);
 			RA_Offline_ledgerWriteSessionStart(game->id, game->hash,
 			                                   rc_client_get_hardcore_enabled(client) ? 1 : 0);
-			
+
 			// Sync pending offline unlocks for this game (runs in background)
 			ra_start_offline_sync(game->id);
 		} else {
@@ -2136,9 +2189,18 @@ void RA_init(void) {
 	
 	// Configure logging
 	rc_client_enable_logging(ra_client, RC_CLIENT_LOG_LEVEL_WARN, ra_log_message);
-	
+
 	// Set event handler
 	rc_client_set_event_handler(ra_client, ra_event_handler);
+
+#if defined(RA_SPECTATOR_MODE) && RA_SPECTATOR_MODE
+	// Developer/test build: suppress all unlock + leaderboard submissions to
+	// the RA server while keeping local event notifications. Must be set
+	// before any game is loaded — rc_client locks the flag once a session
+	// starts.
+	rc_client_set_spectator_mode_enabled(ra_client, 1);
+	RA_LOG_WARN("*** SPECTATOR MODE ENABLED — no unlocks will be sent to server ***\n");
+#endif
 	
 	// Initialize and register CHD-aware CD reader for disc game hashing
 	ra_init_cdreader();
@@ -2471,6 +2533,10 @@ void RA_unloadGame(void) {
 		if (game) {
 			RA_Offline_ledgerWriteSessionEnd(game->id, game->hash);
 		}
+		// Clear the sync engine's session marker — any future sync (e.g.
+		// triggered by a probe before the next game loads) must treat
+		// remaining ledger entries as cross-session.
+		RA_Sync_setCurrentSessionStart(0);
 		
 		// Save any pending muted achievements
 		ra_save_muted_achievements();
@@ -2838,6 +2904,15 @@ bool RA_isHardcoreModeActive(void) {
 		return false;
 	}
 	return rc_client_get_hardcore_enabled(ra_client) != 0;
+}
+
+bool RA_isAchievementUnlockedForDisplay(const void* achievement) {
+	const rc_client_achievement_t* ach = (const rc_client_achievement_t*)achievement;
+	if (!ach) return false;
+	if (RA_isHardcoreModeActive()) {
+		return (ach->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_HARDCORE) != 0;
+	}
+	return ach->unlocked != RC_CLIENT_ACHIEVEMENT_UNLOCKED_NONE;
 }
 
 bool RA_isLoggedIn(void) {

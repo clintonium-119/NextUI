@@ -873,6 +873,25 @@ int main(int argc, char *argv[])
                 sync_thread.join();
                 MenuList::hideOverlay();
 
+                // Cross-session demotion notice. The Settings app runs as a
+                // separate process from minarch and never registers a session
+                // start, so every successful hardcore unlock submitted here is
+                // by definition cross-session and was demoted to softcore per
+                // RA's offline contract. Surface the manual-unlock escape
+                // valve before returning to the menu.
+                if (sync_result.demoted > 0) {
+                    char demote_overlay[256];
+                    snprintf(demote_overlay, sizeof(demote_overlay),
+                             "%u Hardcore unlock%s from a previous offline\n"
+                             "session were demoted to Softcore.\n\n"
+                             "To recover Hardcore credit, contact\n"
+                             "RetroAchievements to request a manual\n"
+                             "unlock for these achievements.",
+                             sync_result.demoted,
+                             sync_result.demoted == 1 ? "" : "s");
+                    MenuList::showOverlay(demote_overlay, OverlayDismissMode::DismissOnA);
+                }
+
                 // Update button description with result
                 if (SDL_AtomicGet(&cancel) && sync_result.synced == 0) {
                     item.setDesc("Sync cancelled");
@@ -883,6 +902,11 @@ int main(int argc, char *argv[])
                 } else if (sync_result.failed > 0) {
                     snprintf(msg, sizeof(msg), "Incomplete: %u synced, retry later",
                              sync_result.synced);
+                    item.setDesc(msg);
+                } else if (sync_result.synced > 0 && sync_result.demoted > 0) {
+                    snprintf(msg, sizeof(msg),
+                             "Synced %u (%u demoted to Softcore)",
+                             sync_result.synced, sync_result.demoted);
                     item.setDesc(msg);
                 } else if (sync_result.synced > 0) {
                     snprintf(msg, sizeof(msg), "Synced %u achievement%s",

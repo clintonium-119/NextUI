@@ -28,6 +28,14 @@ typedef struct {
 	uint32_t skipped;   /* Skipped (server rejected, e.g. invalid achievement) */
 	uint32_t failed;    /* Failed (network error, stops sync) */
 	uint32_t total;     /* Total pending at start (after filtering) */
+	uint32_t demoted;   /* Hardcore unlocks submitted as softcore because they
+	                       crossed a session boundary (see
+	                       RA_Sync_setCurrentSessionStart). RA's offline
+	                       contract — "if you close the emulator before
+	                       reconnecting, your achievements won't sync" — means
+	                       cross-session hardcore credit must not auto-award.
+	                       The user is pointed at the manual-unlock path
+	                       (RAdmin DM) to recover hardcore credit if desired. */
 } RA_SyncResult;
 
 /**
@@ -70,6 +78,24 @@ typedef void (*RA_SyncProgressCallback)(uint32_t current, uint32_t total,
  * @return true if there are pending unlocks
  */
 bool RA_Sync_hasPendingUnlocks(uint32_t* out_count);
+
+/**
+ * Register the current gameplay session's start time (unix seconds).
+ *
+ * Used by RA_Sync_syncAll to decide whether a pending hardcore unlock
+ * still belongs to the current session — those sync as hardcore — or
+ * crossed a process/session boundary, in which case they're demoted to
+ * softcore on submission (see RA_SyncResult.demoted for the rationale).
+ *
+ * Call this from minarch when it writes the SESSION_START ledger record
+ * on game load. Settings.pak (which doesn't run a game session) should
+ * never call this, leaving the marker at 0 — every pending hardcore
+ * unlock is then treated as cross-session and demoted.
+ *
+ * @param session_start_ts Unix timestamp of the SESSION_START record,
+ *                         or 0 to clear (e.g. on game unload).
+ */
+void RA_Sync_setCurrentSessionStart(uint32_t session_start_ts);
 
 /**
  * Sync pending offline unlocks to the RA server.

@@ -43,7 +43,7 @@ your SD card:
 | Authenticated flag | `minui.cfg` (`raAuthenticated=`) | UI state | Same as token |
 | Hardcore-mode flag | `minui.cfg` (`raHardcoreMode=`) | User preference | Until changed |
 | Achievement-set cache | `Saves/.userdata/[platform]/.ra/offline/cache/` | Lets achievements work without an active connection | Until manually deleted or overwritten by a fresh fetch |
-| Offline unlock ledger | `Saves/.userdata/[platform]/.ra/offline/ledger.bin` | Queues achievements unlocked while offline so they sync later | Cleared as entries successfully sync to RA |
+| Offline unlock ledger | `Saves/.userdata/[platform]/.ra/offline/ledger.bin` | Append-only, hash-chained durable queue of achievements unlocked while offline (softcore and hardcore) so they sync later; survives crashes and reboots | Compacted on successful sync; fully deleted when no pending entries remain |
 | Badge images | `Saves/.userdata/[platform]/.ra/badges/` | Displayed in achievement notifications and lists | Until manually deleted |
 
 **Plaintext storage of the password.** The password is stored
