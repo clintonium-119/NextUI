@@ -1183,9 +1183,20 @@ static void State_resume(void) {
 	// RA hardcore: launcher always writes RESUME_SLOT_PATH; consume it
 	// silently in hardcore so the user does not get a load-blocked
 	// notification on every game launch. State_read() would block anyway.
-	if (RA_isHardcoreModeActive()) {
+	//
+	// Use the user's persisted preference (not RA_isHardcoreModeActive())
+	// because rcheevos hasn't finished loading the game at this point:
+	// ra_game_state is still GAME_NONE, so RA_isHardcoreModeActive() would
+	// return false even when the user prefers hardcore — letting the state
+	// slip in before the spec-mandated clean start.
+	//
+	// Hardcore-preferring users who cold-boot offline get forced into
+	// softcore by ra_integration init; still skip the resume here so they
+	// start clean and a later reconnect-driven elevation has no stale state
+	// to reset away.
+	if (CFG_getRAEnable() && CFG_getRAHardcoreMode()) {
 		unlink(RESUME_SLOT_PATH);
-		LOG_info("State resume skipped - hardcore mode active\n");
+		LOG_info("State resume skipped - hardcore preference active\n");
 		return;
 	}
 
