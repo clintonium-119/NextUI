@@ -67,8 +67,8 @@ NextUI/v<NEXTUI_VERSION> (<OS> <kernel>; <platform>) [<core>/<core_version>]
 
 - Construction: `workspace/all/common/http.c` (`HTTP_getUserAgent`,
   `HTTP_setCoreInfo`, `http_get_os_clause`).
-- Core registration: `workspace/all/minarch/minarch.c` (after
-  `core.get_system_info()` and in `Core_quit`).
+- Core registration: `workspace/all/minarch/ma_core.c` (in `Core_open`
+  after `core.get_system_info()`, and cleared in `Core_quit`).
 - Version source: `VERSION` (repo root); injected via
   `-DNEXTUI_VERSION=` from `makefile`, `workspace/all/minarch/makefile`,
   `workspace/all/settings/makefile`.
@@ -95,23 +95,40 @@ preserved in the public Git history.
 ## 4. Hardcore mode enforcement — restriction matrix (spec §B)
 
 This matrix demonstrates what is blocked in hardcore mode and how each
-block is enforced. Every row is mapped to one or more file:line
-references for reviewers who wish to audit the source.
+block is enforced. Every row names the module and function so reviewers
+can audit the source. (`minarch.c` was refactored into `ma_*.c` modules;
+these paths reflect the current layout.)
 
 | Restriction | Enforced where | Notification user sees |
 |---|---|---|
-| Load state | `workspace/all/minarch/minarch.c` `State_read` | "Load states disabled in Hardcore mode" |
-| Save state | Allowed (per spec §B note: saving is not a hardcore violation) | — |
-| Auto-resume on next boot | `State_resume` silently consumes the resume marker | (no nag — see Phase 1 design notes) |
-| Auto-resume marker write | `Menu_beforeSleep` skipped | — |
-| Quick-resume / Game Switcher save-on-exit | `SHORTCUT_SAVE_QUIT`, `SHORTCUT_GAMESWITCHER` skip `Menu_saveState` | (game returns to launcher; relaunch boots ROM cleanly) |
-| Cheat enable (toggle) | `workspace/all/minarch/minarch.c` cheat-toggle path | "Cheats disabled in Hardcore mode" |
-| Cheat auto-load on game start | `Core_applyCheats` skips per-entry `cheat_set` | (one-time notification per game-load if any cheat was disabled) |
-| Cheat persistent enable flag | `parse_cheats` force-clears all `enabled` flags on load | (notification as above) |
-| Rewind: hold-rewind hotkey | `SHORTCUT_HOLD_REWIND` gated | "Rewind disabled in Hardcore mode" |
-| Rewind: toggle-rewind hotkey | `SHORTCUT_TOGGLE_REWIND` gated | "Rewind disabled in Hardcore mode" |
-| Rewind: buffer allocation | `Rewind_init` skipped — no memory allocated, no worker thread | — |
+| Load state | `ma_saves.c` `State_read` returns early before deserialising | "Load states disabled in Hardcore mode" |
+| Save state (create) | **Intentionally allowed** (`ma_saves.c` `State_write`, ungated) — see note below | — |
+| Auto-resume on next boot | `ma_saves.c` `State_resume` silently consumes the resume marker | (no nag — see Phase 1 design notes) |
+| Auto-resume marker write | `ma_menu.c` `Menu_beforeSleep` skips `putFile(AUTO_RESUME_PATH…)` | — |
+| Quick-resume / Game Switcher save-on-exit | `ma_input.c` `SHORTCUT_SAVE_QUIT`, `SHORTCUT_GAMESWITCHER` skip `Menu_saveState` | (game returns to launcher; relaunch boots ROM cleanly) |
+| Cheat enable (toggle) | `ma_frontend_opts.c` `OptionCheats_optionChanged` reverts the toggle | "Cheats disabled in Hardcore mode" |
+| Cheat auto-load on game start | `ma_core.c` `Core_applyCheats` skips per-entry `cheat_set` | (one-time notification per game-load if any cheat was disabled) |
+| Cheat persistent enable flag | `ma_cheats.c` `Cheats_load` force-clears all `enabled` flags on load | (notification as above) |
+| Rewind: hold-rewind hotkey | `ma_input.c` `SHORTCUT_HOLD_REWIND` gated | "Rewind disabled in Hardcore mode" |
+| Rewind: toggle-rewind hotkey | `ma_input.c` `SHORTCUT_TOGGLE_REWIND` gated | "Rewind disabled in Hardcore mode" |
+| Rewind: buffer allocation | `ma_rewind.c` `Rewind_init` skipped — no memory allocated, no worker thread | — |
 | Slow-mo / frame advance / TAS / RAM editor | None present in NextUI; nothing to gate | — |
+
+**Save vs. load — the compliance line is at loading, not saving.** The spec
+draws the line explicitly:
+
+> "Users should be allowed to create save states while in hardcore for
+> debugging purposes, but those states cannot be loadable when hardcore mode
+> is enabled."
+> "Loading save states is ALWAYS blocked in hardcore."
+
+Accordingly, NextUI **permits creating** save states in hardcore (`State_write`
+has no hardcore guard) and **unconditionally blocks loading** them
+(`State_read` returns before deserialising, regardless of connectivity). There
+is no exploit path: a state created in hardcore cannot be loaded while hardcore
+is active, and a user who drops to softcore to load it earns only softcore
+credit. The sole save-state item in the spec's Auto-Fail Criteria — "Loading
+save states in hardcore mode" — is therefore satisfied.
 
 ### Toggle behaviour and visibility (spec §C, §D)
 
