@@ -187,8 +187,14 @@ static HTTP_Response* execute_curl(const char* url, const char* post_data, const
 	if (post_data) {
 		char* escaped_data = shell_escape(post_data);
 		const char* ct = content_type ? content_type : "application/x-www-form-urlencoded";
-		char* escaped_ct = shell_escape(ct);
-		
+		// Escape the whole header as one shell token. (The previous code
+		// escaped only the value and then embedded the raw ct inside fixed
+		// single-quotes — a latent shell-injection if ct ever contained a
+		// quote; the escaped value was computed but never used.)
+		char ct_header[256];
+		snprintf(ct_header, sizeof(ct_header), "Content-Type: %s", ct);
+		char* escaped_ct = shell_escape(ct_header);
+
 		if (!escaped_data || !escaped_ct) {
 			free(escaped_url);
 			free(escaped_ua);
@@ -197,20 +203,20 @@ static HTTP_Response* execute_curl(const char* url, const char* post_data, const
 			response->error = strdup("Memory allocation failed");
 			return response;
 		}
-		
+
 		snprintf(cmd, sizeof(cmd),
 			"curl -s -S -k -L --connect-timeout %d -m %d "
 			"-A %s "
-			"-H 'Content-Type: %s' "
+			"-H %s "
 			"-d %s "
 			"-w '\\n%%{http_code}' "
 			"%s 2>&1",
 			HTTP_TIMEOUT_SECS, HTTP_TIMEOUT_SECS * 2,
 			escaped_ua,
-			ct,
+			escaped_ct,
 			escaped_data,
 			escaped_url);
-		
+
 		free(escaped_data);
 		free(escaped_ct);
 	} else {

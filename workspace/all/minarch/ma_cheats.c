@@ -343,7 +343,9 @@ bool Cheats_load() {
 	// RA hardcore: parse the file so the menu can list available cheats,
 	// but force every entry to disabled so they can never be applied.
 	// One-time notification per game-load when entries were force-disabled.
-	if (RA_isHardcoreModeActive()) {
+	// Uses *Enabled() not *Active() — Cheats_load() runs during Core_load(),
+	// before the async game-load sets GAME_LOADED.
+	if (RA_isHardcoreModeEnabled()) {
 		int forced = 0;
 		for (int ci = 0; ci < cheatcodes.count; ci++) {
 			if (cheatcodes.cheats[ci].enabled) {

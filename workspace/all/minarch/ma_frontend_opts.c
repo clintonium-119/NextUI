@@ -54,20 +54,29 @@ static MenuList OptionFrontend_menu = {
 	.on_change = OptionFrontend_optionChanged,
 	.items = NULL,
 };
+// RA hardcore: rewind is fully disabled (buffer never allocated, hotkeys
+// blocked), so its frontend options are inert. Exclude them from the in-game
+// menu so the user isn't offered toggles that silently do nothing.
+static int FrontendOpt_hiddenByHardcore(int i) {
+	if (!RA_isHardcoreModeActive()) return 0;
+	return i==FE_OPT_REWIND_ENABLE || i==FE_OPT_REWIND_BUFFER
+	    || i==FE_OPT_REWIND_GRANULARITY || i==FE_OPT_REWIND_AUDIO
+	    || i==FE_OPT_REWIND_COMPRESSION || i==FE_OPT_REWIND_COMPRESSION_ACCEL;
+}
 int OptionFrontend_openMenu(MenuList* list, int i) {
 	if (OptionFrontend_menu.items==NULL) {
 		// TODO: where do I free this? I guess I don't :sweat_smile:
 		if (!config.frontend.enabled_count) {
 			int enabled_count = 0;
 			for (int i=0; i<config.frontend.count; i++) {
-				if (!config.frontend.options[i].lock) enabled_count += 1;
+				if (!config.frontend.options[i].lock && !FrontendOpt_hiddenByHardcore(i)) enabled_count += 1;
 			}
 			config.frontend.enabled_count = enabled_count;
 			config.frontend.enabled_options = calloc(enabled_count+1, sizeof(Option*));
 			int j = 0;
 			for (int i=0; i<config.frontend.count; i++) {
 				Option* item = &config.frontend.options[i];
-				if (item->lock) continue;
+				if (item->lock || FrontendOpt_hiddenByHardcore(i)) continue;
 				config.frontend.enabled_options[j] = item;
 				j += 1;
 			}

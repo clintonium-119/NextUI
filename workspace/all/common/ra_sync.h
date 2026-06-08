@@ -63,13 +63,20 @@ typedef struct {
  * Progress callback invoked after each submission attempt.
  * Called from the sync thread (the calling thread).
  * 
- * @param current  1-based index of the unlock just processed
- * @param total    Total number of unlocks being processed
- * @param success  true if this unlock was synced successfully
- * @param userdata Opaque pointer passed to RA_Sync_syncAll
+ * @param current        1-based index of the unlock just processed
+ * @param total          Total number of unlocks being processed
+ * @param success        true if this unlock was synced successfully
+ * @param achievement_id ID of the unlock just processed
+ * @param timestamp      Unix timestamp of the unlock just processed
+ * @param userdata       Opaque pointer passed to RA_Sync_syncAll
+ *
+ * achievement_id/timestamp let the caller record exactly which unlocks
+ * succeeded, rather than guessing by position (a skipped unlock before a
+ * successful one would otherwise mis-attribute the success).
  */
 typedef void (*RA_SyncProgressCallback)(uint32_t current, uint32_t total,
-                                        bool success, void* userdata);
+                                        bool success, uint32_t achievement_id,
+                                        uint32_t timestamp, void* userdata);
 
 /**
  * Check if there are pending offline unlocks without performing any sync.

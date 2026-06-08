@@ -82,6 +82,9 @@ typedef struct {
 			uint32_t ids[RA_EVQ_MAX_SYNC_IDS];
 			uint32_t timestamps[RA_EVQ_MAX_SYNC_IDS];
 			uint32_t count;
+			uint32_t demoted;  /* hardcore unlocks submitted as softcore;
+			                      main thread shows the demote toast (the
+			                      sync thread must not push notifications) */
 		} sync_done;
 	} data;
 } RAEvent;

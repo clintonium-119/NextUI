@@ -926,8 +926,19 @@ static void ra_show_game_summary(rc_client_t* client, const rc_client_game_t* ga
 	 * they're in." Append the mode tag to the existing game-summary
 	 * notification so we satisfy the requirement without an always-on
 	 * HUD overlay. */
-	const char* mode_tag = rc_client_get_hardcore_enabled(client)
-	                       ? " · Hardcore" : " · Softcore";
+	// When the user prefers hardcore but we're offline, hardcore can't start
+	// (spec: online required). Say so here rather than silently showing
+	// "Softcore" — this game-start notification is the surrogate for the
+	// "Hardcore requires internet" feedback we can't give at the (separate-
+	// process) settings toggle.
+	const char* mode_tag;
+	if (rc_client_get_hardcore_enabled(client)) {
+		mode_tag = " · Hardcore";
+	} else if (CFG_getRAHardcoreMode() && ra_get_conn_state() != CONN_ONLINE) {
+		mode_tag = " · Softcore (offline)";
+	} else {
+		mode_tag = " · Softcore";
+	}
 	snprintf(message, sizeof(message), "%s - %u/%u achievements%s",
 	         game->title, display_unlocked, display_total, mode_tag);
 	Notification_push(NOTIFICATION_ACHIEVEMENT, message, NULL);
@@ -1613,6 +1624,26 @@ static void ra_prefetch_badges(rc_client_t* client) {
  *****************************************************************************/
 
 
+/* Collects the achievement IDs that actually synced, by ID rather than by
+ * position — the sync engine reports each unlock's id/success as it goes, so a
+ * skipped unlock before a successful one can no longer be mis-attributed. */
+typedef struct {
+	uint32_t ids[RA_EVQ_MAX_SYNC_IDS];
+	uint32_t timestamps[RA_EVQ_MAX_SYNC_IDS];
+	uint32_t count;
+} RASyncIdCollector;
+
+static void ra_sync_collect_cb(uint32_t current, uint32_t total, bool success,
+                               uint32_t achievement_id, uint32_t timestamp,
+                               void* userdata) {
+	(void)current; (void)total;
+	RASyncIdCollector* c = (RASyncIdCollector*)userdata;
+	if (!c || !success || c->count >= RA_EVQ_MAX_SYNC_IDS) return;
+	c->ids[c->count] = achievement_id;
+	c->timestamps[c->count] = timestamp;
+	c->count++;
+}
+
 /**
  * Background thread function: replay pending offline unlocks using
  * the shared sync engine (ra_sync.c).
@@ -1653,57 +1684,47 @@ static int ra_sync_thread_func(void* data) {
 		Notification_showProgressIndicator(msg, "", NULL);
 	}
 	
-	// Run the shared sync engine with background timing
+	// Run the shared sync engine with background timing. The collector
+	// records exactly which achievement IDs synced (M2: by id, not position).
+	RASyncIdCollector collector;
+	memset(&collector, 0, sizeof(collector));
 	RA_SyncConfig config = RA_SYNC_CONFIG_BACKGROUND;
 	RA_SyncResult result = RA_Sync_syncAll(ra_sync_game_id, &config,
-	                                       &ra_sync_abort, NULL, NULL);
+	                                       &ra_sync_abort, ra_sync_collect_cb,
+	                                       &collector);
 	
 	RA_LOG_INFO("[SYNC_THREAD] Sync complete: %u synced, %u skipped, %u failed (of %u) "
 	            "(time_now=%lld)\n",
 	            result.synced, result.skipped, result.failed, result.total,
 	            (long long)time(NULL));
 	
-	// Post synced achievement IDs to the FSM event queue for the main thread.
-	// We know that RA_Sync_syncAll processes unlocks in order from the
-	// pending list, and synced + skipped + failed <= total. The first
-	// (synced + skipped) entries in our pre-snapshot were processed.
-	// We collect the IDs that match the game filter and were successfully
-	// synced so the main thread can update rcheevos unlock bits.
-	if (result.synced > 0 && pre_unlocks && pre_count > 0) {
+	free(pre_unlocks);
+
+	// Post results to the FSM event queue for the main thread to apply.
+	// The collector holds the exact achievement IDs that synced (per the
+	// engine's per-unlock success callback). The event also carries the
+	// demoted count so the main thread — not this worker — shows the
+	// demote toast (Notification_push is not thread-safe).
+	// (Hardcore unlocks are synced too — within-session as hardcore,
+	// cross-session as softcore after demotion. The apply path uses
+	// rcheevos' current hardcore state to decide which bits to set; that
+	// matches reality for within-session unlocks and is harmlessly stale
+	// for cross-session ones until the next game load refreshes from the
+	// patched startsession cache.)
+	if (collector.count > 0 || result.demoted > 0) {
 		RAEvent sync_ev;
 		memset(&sync_ev, 0, sizeof(sync_ev));
 		sync_ev.type = RA_EV_SYNC_DONE;
-		
-		uint32_t idx = 0;
-		uint32_t processed = 0;
-		for (uint32_t i = 0; i < pre_count && idx < RA_EVQ_MAX_SYNC_IDS; i++) {
-			// Skip entries that don't match the game filter
-			if (ra_sync_game_id != 0 && pre_unlocks[i].game_id != ra_sync_game_id)
-				continue;
-			// (Hardcore unlocks are now synced too — within-session as
-			// hardcore, cross-session as softcore after demotion. The apply
-			// path uses rcheevos' current hardcore state to decide which
-			// bits to set; that matches reality for within-session unlocks
-			// and is harmlessly stale for cross-session ones until the
-			// next game load refreshes from the patched startsession cache.)
-			// The sync processes in order: synced entries come first,
-			// then skipped, then failed (which stops the loop).
-			// We can't distinguish synced vs skipped by position alone,
-			// but we know exactly result.synced were successful.
-			// Since the sync thread writes SYNC_ACK for each success,
-			// just store all IDs up to result.synced count.
-			processed++;
-			if (processed <= result.synced) {
-				sync_ev.data.sync_done.ids[idx] = pre_unlocks[i].achievement_id;
-				sync_ev.data.sync_done.timestamps[idx] = pre_unlocks[i].timestamp;
-				idx++;
-			}
+		sync_ev.data.sync_done.count = collector.count;
+		if (collector.count > 0) {
+			memcpy(sync_ev.data.sync_done.ids, collector.ids,
+			       collector.count * sizeof(uint32_t));
+			memcpy(sync_ev.data.sync_done.timestamps, collector.timestamps,
+			       collector.count * sizeof(uint32_t));
 		}
-		sync_ev.data.sync_done.count = idx;
+		sync_ev.data.sync_done.demoted = result.demoted;
 		RA_EVQ_post(&sync_ev);
 	}
-	
-	free(pre_unlocks);
 	
 	// Show completion in top-left progress area, then auto-hide
 	{
@@ -1732,28 +1753,21 @@ static int ra_sync_thread_func(void* data) {
 
 	// Cross-session demotion: pending hardcore unlocks from a prior
 	// process/game session were synced as softcore, matching RA's offline
-	// contract. Notifications are capped at NOTIFICATION_MAX_MESSAGE (64
-	// bytes), so split the message into two sequential toasts — the queue
-	// (NOTIFICATION_MAX_QUEUE=4) renders them back-to-back. First states
-	// what happened, second points at the manual-unlock recovery path.
+	// contract. The demote toast is emitted by action_sync_done() on the
+	// main thread (via the SYNC_DONE event's demoted count) — Notification_push
+	// is not thread-safe and must never be called from this worker thread.
 	if (result.demoted > 0) {
-		char demote_msg[NOTIFICATION_MAX_MESSAGE];
-		snprintf(demote_msg, sizeof(demote_msg),
-		         "%u Hardcore unlock%s synced as Softcore",
-		         result.demoted, result.demoted == 1 ? "" : "s");
-		Notification_push(NOTIFICATION_ACHIEVEMENT, demote_msg, NULL);
-		Notification_push(NOTIFICATION_ACHIEVEMENT,
-		                  "Request manual unlock for Hardcore credit", NULL);
-		RA_LOG_INFO("[SYNC_THREAD] Notified user of %u demoted unlock(s)\n",
+		RA_LOG_INFO("[SYNC_THREAD] %u demoted unlock(s) — main thread will notify\n",
 		            result.demoted);
 	}
-	
-	// If sync failed, go back to offline mode and restart the probe
-	// so connectivity can be re-verified and sync retried
+
+	// If sync failed, go back to offline mode. The probe restart is performed
+	// by action_sync_failed() on the main thread (H1: the probe thread handle
+	// must only be started/stopped from the main thread to avoid racing a
+	// concurrent ra_stop_connectivity_probe()).
 	if (result.failed > 0) {
 		RA_Offline_setOffline(true);
 		RA_EVQ_post_signal(RA_EV_SYNC_FAILED);
-		ra_start_connectivity_probe();
 	}
 	
 	RA_Offline_setSyncing(false);
@@ -2634,6 +2648,20 @@ static void action_sync_done(const RAEvent* ev) {
 		memcpy(ra_sync_apply_timestamps, ev->data.sync_done.timestamps,
 		       ev->data.sync_done.count * sizeof(uint32_t));
 	}
+
+	// Cross-session demotion toast (moved off the sync thread — B1).
+	// Notifications are capped at NOTIFICATION_MAX_MESSAGE (64 bytes), so
+	// split into two sequential toasts: what happened, then the recovery path.
+	if (ev->data.sync_done.demoted > 0) {
+		char demote_msg[NOTIFICATION_MAX_MESSAGE];
+		snprintf(demote_msg, sizeof(demote_msg),
+		         "%u Hardcore unlock%s synced as Softcore",
+		         ev->data.sync_done.demoted,
+		         ev->data.sync_done.demoted == 1 ? "" : "s");
+		Notification_push(NOTIFICATION_ACHIEVEMENT, demote_msg, NULL);
+		Notification_push(NOTIFICATION_ACHIEVEMENT,
+		                  "Request manual unlock for Hardcore credit", NULL);
+	}
 }
 
 /**
@@ -2650,11 +2678,16 @@ static void action_sync_failed(const RAEvent* ev) {
 	
 	ra_user_saw_offline = true;
 	ra_deferred_offline_notification = true;
-	
+
 	if (ra_client) {
 		rc_client_set_hardcore_enabled(ra_client, 0);
 		RA_LOG_INFO("Hardcore disabled after sync failure (offline mode)\n");
 	}
+
+	// Restart the connectivity probe here on the main thread (H1): the sync
+	// worker posts RA_EV_SYNC_FAILED instead of starting the probe itself, so
+	// the probe-thread handle is only ever touched from the main thread.
+	ra_start_connectivity_probe();
 }
 
 /**
@@ -2904,6 +2937,13 @@ bool RA_isHardcoreModeActive(void) {
 		return false;
 	}
 	return rc_client_get_hardcore_enabled(ra_client) != 0;
+}
+
+bool RA_isHardcoreModeEnabled(void) {
+	// No GAME_LOADED guard: the client's hardcore flag is set in RA_init()
+	// (offline-adjusted) before the async game-load completes, so this is
+	// valid during Core_load()/Rewind_init() where the *Active() check is not.
+	return ra_client && rc_client_get_hardcore_enabled(ra_client) != 0;
 }
 
 bool RA_isAchievementUnlockedForDisplay(const void* achievement) {

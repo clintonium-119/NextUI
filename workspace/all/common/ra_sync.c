@@ -320,7 +320,7 @@ RA_SyncResult RA_Sync_syncAll(uint32_t game_id,
 			RA_LOG_ERROR("ach=%u: failed to build POST data\n", unlock->achievement_id);
 			result.skipped++;
 			if (progress_cb) {
-				progress_cb(i + 1, count, false, userdata);
+				progress_cb(i + 1, count, false, unlock->achievement_id, unlock->timestamp, userdata);
 			}
 			continue;
 		}
@@ -386,13 +386,13 @@ RA_SyncResult RA_Sync_syncAll(uint32_t game_id,
 			RA_LOG_ERROR("ach=%u: network error, stopping sync\n", unlock->achievement_id);
 			result.failed++;
 			if (progress_cb) {
-				progress_cb(i + 1, count, false, userdata);
+				progress_cb(i + 1, count, false, unlock->achievement_id, unlock->timestamp, userdata);
 			}
 			break;
 		}
 
 		if (progress_cb) {
-			progress_cb(i + 1, count, parse_result == 1, userdata);
+			progress_cb(i + 1, count, parse_result == 1, unlock->achievement_id, unlock->timestamp, userdata);
 		}
 
 		/* Delay before next submission (skip after last item or if cancelled) */

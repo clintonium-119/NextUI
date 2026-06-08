@@ -64,6 +64,16 @@ bool RA_isGameLoaded(void);
 bool RA_isHardcoreModeActive(void);
 
 /**
+ * Like RA_isHardcoreModeActive(), but WITHOUT the "game is loaded" guard.
+ * Reflects whether the rcheevos client is configured for hardcore (already
+ * offline-adjusted in RA_init). Use this for boot-time enforcement that runs
+ * BEFORE the async game-load completes (cheat application, rewind buffer
+ * allocation), where RA_isHardcoreModeActive() would falsely return false.
+ * @return true if the rcheevos client has hardcore enabled
+ */
+bool RA_isHardcoreModeEnabled(void);
+
+/**
  * Decide whether an achievement should render in its "unlocked" (color) state
  * for the *current* gameplay mode. In hardcore, a softcore-only unlock should
  * still appear locked (grayscale); in softcore, any unlock counts.

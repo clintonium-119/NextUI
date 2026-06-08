@@ -111,7 +111,10 @@ void Core_applyCheats(struct Cheats *cheats)
 
 	// RA hardcore: cheat application is forbidden. Reset clears any
 	// prior cheats; we then skip the per-entry cheat_set loop.
-	if (RA_isHardcoreModeActive()) {
+	// Uses *Enabled() not *Active(): Core_load()->Core_applyCheats() runs
+	// before the async game-load sets GAME_LOADED, so *Active() would be
+	// false here and cheats would slip through into the hardcore session.
+	if (RA_isHardcoreModeEnabled()) {
 		LOG_info("Cheats: apply skipped - hardcore mode active\n");
 		return;
 	}

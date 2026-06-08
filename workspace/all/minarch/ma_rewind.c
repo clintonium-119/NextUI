@@ -267,7 +267,9 @@ int Rewind_init(size_t state_size) {
 	// RA hardcore: rewind buffer must not be allocated, and the worker
 	// thread must not run. Reconnect-driven soft→hardcore transitions
 	// also tear the buffer down via Hardcore_onEnableTransition().
-	if (RA_isHardcoreModeActive()) {
+	// Uses *Enabled() not *Active(): Rewind_init() runs at boot before the
+	// async game-load sets GAME_LOADED, so *Active() would be false here.
+	if (RA_isHardcoreModeEnabled()) {
 		LOG_info("Rewind: skipped init - hardcore mode active\n");
 		return 0;
 	}

@@ -1480,7 +1480,9 @@ void CFG_print(void)
     printf("\t\"raEnable\": %i,\n", settings.raEnable);
     printf("\t\"raUsername\": \"%s\",\n", settings.raUsername);
     printf("\t\"raHardcoreMode\": %i,\n", settings.raHardcoreMode);
-    printf("\t\"raToken\": \"%s\",\n", settings.raToken);
+    // Don't print the RA token verbatim — it's bearer-equivalent to the
+    // password. Report only whether one is set.
+    printf("\t\"raToken\": \"%s\",\n", settings.raToken[0] ? "<set>" : "<unset>");
     printf("\t\"raServerUsername\": \"%s\",\n", settings.raServerUsername);
     printf("\t\"raAuthenticated\": %i,\n", settings.raAuthenticated);
     printf("\t\"raShowNotifications\": %i,\n", settings.raShowNotifications);

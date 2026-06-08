@@ -880,7 +880,9 @@ int main(int argc, char *argv[])
                 // Launch sync on background thread (game_id=0 for all games, NULL config for interactive defaults)
                 std::thread sync_thread([&]() {
                     sync_result = RA_Sync_syncAll(0, NULL, &cancel,
-                        [](uint32_t current, uint32_t total, bool success, void* userdata) {
+                        [](uint32_t current, uint32_t total, bool success,
+                           uint32_t achievement_id, uint32_t timestamp, void* userdata) {
+                            (void)success; (void)achievement_id; (void)timestamp;
                             auto* ctx = static_cast<ProgressCtx*>(userdata);
                             char buf[128];
                             snprintf(buf, sizeof(buf), "Syncing achievements...\n\n(%u/%u)",
