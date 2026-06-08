@@ -30,7 +30,8 @@ void CFG_defaults(NextUISettings *cfg)
         return;
 
     NextUISettings defaults = {
-        .font = CFG_DEFAULT_FONT_ID,
+        .fontFile = CFG_DEFAULT_FONT_FILE,
+        .fontStyle = CFG_DEFAULT_FONT_STYLE,
         .color1_255 = CFG_DEFAULT_COLOR1,
         .color2_255 = CFG_DEFAULT_COLOR2,
         .color3_255 = CFG_DEFAULT_COLOR3,
@@ -119,9 +120,17 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb)
         {
             int temp_value;
             uint32_t temp_color;
-            if (sscanf(line, "font=%i", &temp_value) == 1)
+            if (strncmp(line, "font=", 5) == 0)
             {
-                CFG_setFontId(temp_value);
+                char *value = line + 5;
+                value[strcspn(value, "\n")] = 0;
+                // backward compat: "0" -> font2.ttf, "1" -> font1.ttf
+                if (strcmp(value, "0") == 0)
+                    CFG_setFontFile("font2.ttf");
+                else if (strcmp(value, "1") == 0)
+                    CFG_setFontFile("font1.ttf");
+                else
+                    CFG_setFontFile(value);
                 fontLoaded = true;
                 continue;
             }
@@ -406,6 +415,11 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb)
                 CFG_setRAAchievementSortOrder(temp_value);
                 continue;
             }
+            if (sscanf(line, "fontStyle=%i", &temp_value) == 1)
+            {
+                CFG_setFontStyle(temp_value);
+                continue;
+            }
         }
         fclose(file);
     }
@@ -420,25 +434,36 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb)
     CFG_setColor(7, CFG_getColor(COLOR_BACKGROUND));
     // avoid reloading the font if not neccessary
     if (!fontLoaded)
-        CFG_setFontId(CFG_getFontId());
+        CFG_setFontFile(CFG_getFontFile());
 }
 
-int CFG_getFontId(void)
+const char* CFG_getFontFile(void)
 {
-    return settings.font;
+    return settings.fontFile;
 }
 
-void CFG_setFontId(int id)
+void CFG_setFontFile(const char* filename)
 {
-    settings.font = clamp(id, 0, 2);
+    if (!filename || !filename[0]) {
+        strncpy(settings.fontFile, CFG_DEFAULT_FONT_FILE, sizeof(settings.fontFile) - 1);
+        settings.fontFile[sizeof(settings.fontFile) - 1] = '\0';
+    } else {
+        strncpy(settings.fontFile, filename, sizeof(settings.fontFile) - 1);
+        settings.fontFile[sizeof(settings.fontFile) - 1] = '\0';
+    }
 
-    char *fontPath;
-    if (settings.font == 1)
-        fontPath = RES_PATH "/font1.ttf";
-    else
-        fontPath = RES_PATH "/font2.ttf";
+    // resolve full path: all fonts live in RES_PATH
+    char fontPath[512];
+    snprintf(fontPath, sizeof(fontPath), "%s/%s", RES_PATH, settings.fontFile);
 
-    if(settings.onFontChange)
+    // fall back to default if file doesn't exist
+    if (access(fontPath, F_OK) != 0) {
+        strncpy(settings.fontFile, CFG_DEFAULT_FONT_FILE, sizeof(settings.fontFile) - 1);
+        settings.fontFile[sizeof(settings.fontFile) - 1] = '\0';
+        snprintf(fontPath, sizeof(fontPath), "%s/%s", RES_PATH, settings.fontFile);
+    }
+
+    if (settings.onFontChange)
         settings.onFontChange(fontPath);
 }
 
@@ -1067,11 +1092,29 @@ void CFG_setRAAchievementSortOrder(int sortOrder)
     CFG_sync();
 }
 
+int CFG_getFontStyle(void)
+{
+    return settings.fontStyle;
+}
+
+void CFG_setFontStyle(int style)
+{
+    settings.fontStyle = clamp(style, 0x00, 0x01);
+    CFG_sync();
+    // reload the font to apply the new style (if the font supports it)
+    CFG_setFontFile(CFG_getFontFile());
+}
+
 void CFG_get(const char *key, char *value)
 {
     if (strcmp(key, "font") == 0)
     {
-        sprintf(value, "%i", CFG_getFontId());
+        // backward compat: always return integer (default 1 for custom fonts)
+        const char *f = CFG_getFontFile();
+        if (strcmp(f, "font2.ttf") == 0)
+            sprintf(value, "0");
+        else
+            sprintf(value, "1");
     }
     else if (strcmp(key, "color1") == 0)
     {
@@ -1221,14 +1264,75 @@ void CFG_get(const char *key, char *value)
     {
         sprintf(value, "%i", CFG_getCurrentTimezone());
     }
+    else if (strcmp(key, "notifyManualSave") == 0)
+    {
+        sprintf(value, "%i", (int)(CFG_getNotifyManualSave()));
+    }
+    else if (strcmp(key, "notifyLoad") == 0)
+    {
+        sprintf(value, "%i", (int)(CFG_getNotifyLoad()));
+    }
+    else if (strcmp(key, "notifyScreenshot") == 0)
+    {
+        sprintf(value, "%i", (int)(CFG_getNotifyScreenshot()));
+    }
+    else if (strcmp(key, "notifyAdjustments") == 0)
+    {
+        sprintf(value, "%i", (int)(CFG_getNotifyAdjustments()));
+    }
+    else if (strcmp(key, "notifyDuration") == 0)
+    {
+        sprintf(value, "%i", CFG_getNotifyDuration());
+    }
+    else if (strcmp(key, "raEnable") == 0)
+    {
+        sprintf(value, "%i", (int)(CFG_getRAEnable()));
+    }
+    else if (strcmp(key, "raUsername") == 0)
+    {
+        sprintf(value, "%s", CFG_getRAUsername());
+    }
+    else if (strcmp(key, "raHardcoreMode") == 0)
+    {
+        sprintf(value, "%i", (int)(CFG_getRAHardcoreMode()));
+    }
+    else if (strcmp(key, "raToken") == 0)
+    {
+        sprintf(value, "%s", CFG_getRAToken());
+    }
+    else if (strcmp(key, "raServerUsername") == 0)
+    {
+        sprintf(value, "%s", CFG_getRAServerUsername());
+    }
+    else if (strcmp(key, "raAuthenticated") == 0)
+    {
+        sprintf(value, "%i", (int)(CFG_getRAAuthenticated()));
+    }
+    else if (strcmp(key, "raShowNotifications") == 0)
+    {
+        sprintf(value, "%i", (int)(CFG_getRAShowNotifications()));
+    }
+    else if (strcmp(key, "raNotificationDuration") == 0)
+    {
+        sprintf(value, "%i", CFG_getRANotificationDuration());
+    }
+    else if (strcmp(key, "raProgressNotificationDuration") == 0)
+    {
+        sprintf(value, "%i", CFG_getRAProgressNotificationDuration());
+    }
+    else if (strcmp(key, "raAchievementSortOrder") == 0)
+    {
+        sprintf(value, "%i", CFG_getRAAchievementSortOrder());
+    }
+    else if (strcmp(key, "fontStyle") == 0)
+    {
+        sprintf(value, "%i", CFG_getFontStyle());
+    }
 
     // meta, not a real setting
     else if (strcmp(key, "fontpath") == 0)
     {
-        if (CFG_getFontId() == 1)
-            sprintf(value, "\"%s\"", RES_PATH "/font1.ttf");
-        else
-            sprintf(value, "\"%s\"", RES_PATH "/font2.ttf");
+        sprintf(value, "\"%s/%s\"", RES_PATH, CFG_getFontFile());
     }
 
     else {
@@ -1255,7 +1359,14 @@ void CFG_sync(void)
         return;
     }
 
-    fprintf(file, "font=%i\n", settings.font);
+    // backward compat: write integer for built-in fonts so existing paks
+    // that parse "font=" as an int keep working
+    if (strcmp(settings.fontFile, "font1.ttf") == 0)
+        fprintf(file, "font=1\n");
+    else if (strcmp(settings.fontFile, "font2.ttf") == 0)
+        fprintf(file, "font=0\n");
+    else
+        fprintf(file, "font=%s\n", settings.fontFile);
     fprintf(file, "color1=0x%06X\n", settings.color1_255);
     fprintf(file, "color2=0x%06X\n", settings.color2_255);
     fprintf(file, "color3=0x%06X\n", settings.color3_255);
@@ -1310,6 +1421,7 @@ void CFG_sync(void)
     fprintf(file, "raNotificationDuration=%i\n", settings.raNotificationDuration);
     fprintf(file, "raProgressNotificationDuration=%i\n", settings.raProgressNotificationDuration);
     fprintf(file, "raAchievementSortOrder=%i\n", settings.raAchievementSortOrder);
+    fprintf(file, "fontStyle=%i\n", settings.fontStyle);
 
     fclose(file);
 }
@@ -1317,7 +1429,11 @@ void CFG_sync(void)
 void CFG_print(void)
 {
     printf("{\n");
-    printf("\t\"font\": %i,\n", settings.font);
+    // backward compat: always output integer (default 1 for custom fonts)
+    if (strcmp(settings.fontFile, "font2.ttf") == 0)
+        printf("\t\"font\": 0,\n");
+    else
+        printf("\t\"font\": 1,\n");
     printf("\t\"color1\": \"0x%06X\",\n", settings.color1_255);
     printf("\t\"color2\": \"0x%06X\",\n", settings.color2_255);
     printf("\t\"color3\": \"0x%06X\",\n", settings.color3_255);
@@ -1356,12 +1472,25 @@ void CFG_print(void)
     printf("\t\"btMaxRate\": %i,\n", settings.bluetoothSamplerateLimit);
     printf("\t\"ntp\": %i,\n", settings.ntp);
     printf("\t\"currentTimezone\": %i,\n", settings.currentTimezone);
+    printf("\t\"notifyManualSave\": %i,\n", settings.notifyManualSave);
+    printf("\t\"notifyLoad\": %i,\n", settings.notifyLoad);
+    printf("\t\"notifyScreenshot\": %i,\n", settings.notifyScreenshot);
+    printf("\t\"notifyAdjustments\": %i,\n", settings.notifyAdjustments);
+    printf("\t\"notifyDuration\": %i,\n", settings.notifyDuration);
+    printf("\t\"raEnable\": %i,\n", settings.raEnable);
+    printf("\t\"raUsername\": \"%s\",\n", settings.raUsername);
+    printf("\t\"raHardcoreMode\": %i,\n", settings.raHardcoreMode);
+    printf("\t\"raToken\": \"%s\",\n", settings.raToken);
+    printf("\t\"raServerUsername\": \"%s\",\n", settings.raServerUsername);
+    printf("\t\"raAuthenticated\": %i,\n", settings.raAuthenticated);
+    printf("\t\"raShowNotifications\": %i,\n", settings.raShowNotifications);
+    printf("\t\"raNotificationDuration\": %i,\n", settings.raNotificationDuration);
+    printf("\t\"raProgressNotificationDuration\": %i,\n", settings.raProgressNotificationDuration);
+    printf("\t\"raAchievementSortOrder\": %i,\n", settings.raAchievementSortOrder);
+    printf("\t\"fontStyle\": %i,\n", settings.fontStyle);
 
     // meta, not a real setting
-    if (settings.font == 1)
-        printf("\t\"fontpath\": \"%s\"\n", RES_PATH "/font1.ttf");
-    else
-        printf("\t\"fontpath\": \"%s\"\n", RES_PATH "/font2.ttf");
+    printf("\t\"fontpath\": \"%s/%s\"\n", RES_PATH, CFG_getFontFile());
 
     printf("}\n");
 }
