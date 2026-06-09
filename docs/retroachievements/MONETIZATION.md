@@ -1,6 +1,6 @@
 # NextUI Monetization Policy — RetroAchievements Submission
 
-**Last updated:** [NEEDS CONFIRMATION: date of merge]
+**Last updated:** 2026-06-09
 **Applies to:** NextUI v6.12.0 and later.
 
 NextUI is free and open-source software, distributed under the

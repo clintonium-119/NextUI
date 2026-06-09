@@ -1,6 +1,6 @@
 # NextUI Third-Party Components and Licenses
 
-**Last updated:** [NEEDS CONFIRMATION: date of merge]
+**Last updated:** 2026-06-09
 **Applies to:** NextUI v6.12.0 and later, on Trimui Brick / Smart Pro / Smart Pro S.
 
 This document lists every third-party software component shipped or
@@ -39,32 +39,36 @@ built from upstream libretro sources at the toolchain pinned in
 
 | Pak | Core (`<name>_libretro.so`) | Upstream | License |
 |---|---|---|---|
-| 32X, GG, SEGACD, SG1000, SMS | `picodrive` | <https://github.com/libretro/picodrive> | **Mixed; includes non-commercial components (Cyclone 68k, DrZ80).** Free non-commercial use. [VERIFY: confirm upstream LICENSE at build time] |
-| A2600 | `stella2014` | <https://github.com/libretro/stella2014-libretro> | GPL-2.0 [VERIFY] |
-| A5200 | `a5200` | <https://github.com/libretro/a5200> | GPL-2.0 [VERIFY] |
-| A7800 | `prosystem` | <https://github.com/libretro/prosystem-libretro> | GPL-2.0 [VERIFY] |
+| 32X, GG, SEGACD, SG1000, SMS | `picodrive` | <https://github.com/libretro/picodrive> | **Non-commercial** — MAME-style license (source-available; redistribution may not be sold or used commercially). See [COPYING](https://github.com/libretro/picodrive/blob/master/COPYING). |
+| A2600 | `stella2014` | <https://github.com/libretro/stella2014-libretro> | GPL-2.0-only |
+| A5200 | `a5200` | <https://github.com/libretro/a5200> | GPL-2.0-or-later |
+| A7800 | `prosystem` | <https://github.com/libretro/prosystem-libretro> | GPL-2.0-or-later |
 | C64, C128, PET, PLUS4, VIC | `vice_x64` / `_x128` / `_xpet` / `_xplus4` / `_xvic` | <https://github.com/libretro/vice-libretro> | GPL-2.0 |
-| COLECO | `gearcoleco` | <https://github.com/libretro/gearcoleco> | GPL-3.0 [VERIFY] |
-| CPC | `cap32` | <https://github.com/libretro/libretro-cap32> | GPL-3.0 [VERIFY] |
+| COLECO | `gearcoleco` | <https://github.com/drhelius/Gearcoleco> | GPL-3.0-or-later |
+| CPC | `cap32` | <https://github.com/libretro/libretro-cap32> | GPL-2.0-or-later |
 | FBN | `fbneo` | <https://github.com/libretro/FBNeo> | **FBNeo License — non-commercial, no redistribution for profit.** Free non-commercial use. |
-| FDS | `fceumm` | <https://github.com/libretro/libretro-fceumm> | GPL-2.0 [VERIFY] |
-| LYNX | `handy` | <https://github.com/libretro/libretro-handy> | "Handy License" — free non-commercial use [VERIFY exact terms] |
+| FDS | `fceumm` | <https://github.com/libretro/libretro-fceumm> | GPL-2.0-or-later |
+| LYNX | `handy` | <https://github.com/libretro/libretro-handy> | zlib-style permissive (commercial use permitted; see `lynx/license.txt`) |
 | MGBA, SGB | `mgba` | <https://github.com/libretro/mgba> | MPL-2.0 |
-| MSX | `bluemsx` | <https://github.com/libretro/blueMSX-libretro> | BSD-like (blueMSX license) [VERIFY] |
-| NGP, NGPC | `race` | <https://github.com/libretro/RACE> | GPL-2.0 [VERIFY] |
-| P8 | `fake08` | <https://github.com/libretro/fake-08> | MIT [VERIFY] |
+| MSX | `bluemsx` | <https://github.com/libretro/blueMSX-libretro> | zlib-style (blueMSX license; commercial use permitted); bundles GPL/zlib files — effectively mixed |
+| NGP, NGPC | `race` | <https://github.com/libretro/RACE> | GPL-2.0-only |
+| P8 | `fake08` | <https://github.com/jtothebell/fake-08> | MIT (FAKE-08 code); bundles mixed-license deps (z8lua/MIT, zepto8/WTFPL-2, PicoLove/zlib, LodePNG) |
 | PCE | `mednafen_pce_fast` | <https://github.com/libretro/beetle-pce-fast-libretro> | GPL-2.0 |
-| PKM | `pokemini` | <https://github.com/libretro/PokeMini> | GPL-3.0 [VERIFY] |
+| PKM | `pokemini` | <https://github.com/libretro/PokeMini> | GPL-3.0-or-later |
 | PRBOOM | `prboom` | <https://github.com/libretro/libretro-prboom> | GPL-2.0 |
 | PUAE | `puae2021` | <https://github.com/libretro/libretro-uae> | GPL-2.0 |
 | SUPA | `mednafen_supafaust` | <https://github.com/libretro/supafaust> | GPL-2.0 |
 | VB | `mednafen_vb` | <https://github.com/libretro/beetle-vb-libretro> | GPL-2.0 |
 
-**[VERIFY] entries** must be confirmed against the actual `LICENSE` file
-in the upstream repository at the commit pinned by the NextUI build
-toolchain before the RA submission is filed. The toolchain commits are
-locked in `toolchains/tg5040-toolchain/` and
-`toolchains/tg5050-toolchain/`. See [`SUBMISSION.md`](./SUBMISSION.md)
+The core license column above was verified on 2026-06-09 against each
+upstream repository's `LICENSE`/`COPYING` file (or, where none exists, the
+in-source license headers). Note the corrections from earlier drafts: `cap32`
+is GPL-2.0-or-later (not 3.0); `handy` is a zlib-style **permissive** license
+that permits commercial use (not the non-commercial "Handy License"); several
+GPL entries are "or-later" rather than version-locked. Maintainers should
+re-confirm against the exact commit pinned by the build toolchain
+(`toolchains/tg5040-toolchain/`, `toolchains/tg5050-toolchain/`) before filing
+if any core was bumped since this date. See [`SUBMISSION.md`](./SUBMISSION.md)
 for the verification checklist.
 
 ---
@@ -91,7 +95,7 @@ statically links a build pulled by the toolchain.
 | rcheevos | RetroAchievements client library | MIT | <https://github.com/RetroAchievements/rcheevos> |
 | libretro-common | Common helpers used by libretro cores and minarch | MIT | <https://github.com/libretro/libretro-common> |
 | BlueZ | Bluetooth audio (system library on device) | GPL-2.0 | <http://www.bluez.org/> |
-| libmsettings | Trimui platform settings (vendor library) | [VERIFY] | <https://github.com/shauninman/libmsettings> |
+| libmsettings | Trimui platform settings (vendor library) | **No upstream LICENSE file** — all rights reserved by default. Vendored from the MinUI lineage (Shaun Inman). [NEEDS CONFIRMATION: maintainer to confirm redistribution permission, e.g. via the MinUI fork grant] | <https://github.com/shauninman/libmsettings> |
 
 ---
 

@@ -2,7 +2,7 @@
 
 **Status:** Draft, pre-submission.
 **Target version:** NextUI v6.12.0
-**Spec reference:** [RetroAchievements Hardcore Compliance Specification](https://retroachievements.org/game/24181/hashes) <!-- [NEEDS CONFIRMATION: replace with actual spec URL referenced in HARDCORE_MODE.md] -->
+**Spec reference:** [RetroAchievements Hardcore Compliance Requirements](https://docs.retroachievements.org/general/hardcore-compliance-requirements.html)
 
 This is an internal working document used by the NextUI project to
 prepare and track its RetroAchievements emulator submission. It
@@ -252,9 +252,13 @@ Maintainer should walk through this list once before filing:
 - [ ] Build artefact for the submission carries the exact UA documented
       in §2 (verify by `tcpdump -A 'host retroachievements.org'` on a
       desktop dev build, or by capturing the request in RA server logs).
-- [ ] Hardcore mode tested end-to-end on a real device against a real
-      RA account — at least one hardcore unlock confirmed live in the
-      RA dashboard.
+- [ ] Hardcore restrictions tested end-to-end on a real device against a
+      real RA account: load-state/rewind/cheats blocked, save-state
+      allowed, indicator shown, and *softcore* unlocks register. (A live
+      *hardcore* unlock cannot register until RA whitelists the
+      User-Agent — that is a post-approval smoke test, not a pre-file
+      gate. Pre-approval, hardcore play earns softcore + shows the
+      "Unknown Emulator" warning, ID 101000001.)
 
 ---
 
