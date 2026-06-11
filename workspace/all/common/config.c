@@ -84,7 +84,6 @@ void CFG_defaults(NextUISettings *cfg)
 
         .raEnable = CFG_DEFAULT_RA_ENABLE,
         .raUsername = CFG_DEFAULT_RA_USERNAME,
-        .raPassword = CFG_DEFAULT_RA_PASSWORD,
         .raHardcoreMode = CFG_DEFAULT_RA_HARDCOREMODE,
         .raToken = CFG_DEFAULT_RA_TOKEN,
         .raServerUsername = CFG_DEFAULT_RA_SERVER_USERNAME,
@@ -105,6 +104,9 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb)
     settings.onFontChange = cb;
     settings.onColorSet = ccb;
     bool fontLoaded = false;
+    // Set if we find a legacy plaintext raPassword= line on disk, so we can
+    // scrub it with a one-time rewrite at the end of load (see below).
+    bool legacy_ra_password = false;
 
     char settingsPath[MAX_PATH];
     sprintf(settingsPath, "%s/minuisettings.txt", SHARED_USERDATA_PATH);
@@ -366,9 +368,12 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb)
             }
             if (strncmp(line, "raPassword=", 11) == 0)
             {
-                char *value = line + 11;
-                value[strcspn(value, "\n")] = 0;
-                CFG_setRAPassword(value);
+                // Legacy field: older builds persisted the plaintext password
+                // here. We no longer store it — skip the line and flag it so we
+                // rewrite the file without it before this function returns.
+                // (A bare "raPassword=" with no value is harmless but we still
+                // scrub it to fully retire the field.)
+                legacy_ra_password = true;
                 continue;
             }
             if (sscanf(line, "raHardcoreMode=%i", &temp_value) == 1)
@@ -422,6 +427,16 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb)
             }
         }
         fclose(file);
+
+        // One-time migration: if the settings file still carried a plaintext
+        // raPassword= line from an older build, rewrite it now so the password
+        // is purged from disk on the very first boot of this build — without
+        // requiring the user to change any setting. CFG_sync() emits the full
+        // settings file minus the (now-retired) raPassword field.
+        if (legacy_ra_password) {
+            printf("[CFG] Removing legacy plaintext RA password from settings file\n");
+            CFG_sync();
+        }
     }
 
     // load gfx related stuff until we drop the indirection
@@ -953,20 +968,25 @@ void CFG_setRAUsername(const char* username)
     CFG_sync();
 }
 
+// Transient, RAM-only password buffer. Deliberately NOT part of the persisted
+// NextUISettings struct and never written to disk — it holds the password only
+// long enough to exchange it for a token, then is cleared. Lost on reboot.
+static char ra_password_transient[128] = "";
+
 const char* CFG_getRAPassword(void)
 {
-    return settings.raPassword;
+    return ra_password_transient;
 }
 
 void CFG_setRAPassword(const char* password)
 {
     if (password) {
-        strncpy(settings.raPassword, password, sizeof(settings.raPassword) - 1);
-        settings.raPassword[sizeof(settings.raPassword) - 1] = '\0';
+        strncpy(ra_password_transient, password, sizeof(ra_password_transient) - 1);
+        ra_password_transient[sizeof(ra_password_transient) - 1] = '\0';
     } else {
-        settings.raPassword[0] = '\0';
+        ra_password_transient[0] = '\0';
     }
-    CFG_sync();
+    // No CFG_sync(): the password is intentionally never persisted.
 }
 
 bool CFG_getRAHardcoreMode(void)
@@ -1412,7 +1432,7 @@ void CFG_sync(void)
     fprintf(file, "notifyDuration=%i\n", settings.notifyDuration);
     fprintf(file, "raEnable=%i\n", settings.raEnable);
     fprintf(file, "raUsername=%s\n", settings.raUsername);
-    fprintf(file, "raPassword=%s\n", settings.raPassword);
+    // raPassword intentionally not persisted (transient/RAM only).
     fprintf(file, "raHardcoreMode=%i\n", settings.raHardcoreMode);
     fprintf(file, "raToken=%s\n", settings.raToken);
     fprintf(file, "raServerUsername=%s\n", settings.raServerUsername);

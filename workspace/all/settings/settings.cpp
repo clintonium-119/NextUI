@@ -791,6 +791,9 @@ int main(int argc, char *argv[])
                 if (result == RA_AUTH_SUCCESS) {
                     CFG_setRAToken(response.token);
                     CFG_setRAAuthenticated(true);
+                    // Password has served its purpose — drop it from RAM. The
+                    // token alone is used for all subsequent logins.
+                    CFG_setRAPassword("");
                     std::string desc = "Authenticated as " + std::string(response.display_name);
                     item.setDesc(desc);
                 } else {

@@ -154,7 +154,10 @@ typedef struct
 	// RetroAchievements
 	bool raEnable;
 	char raUsername[64];
-	char raPassword[128];
+	// NOTE: the RA password is deliberately NOT stored here. It is held only
+	// in a transient in-memory buffer (see config.c) long enough to exchange
+	// it for a token via the Authenticate action, then discarded. Only the
+	// token is persisted. See CFG_getRAPassword/CFG_setRAPassword.
 	bool raHardcoreMode;
 	char raToken[64];           // API token (stored after successful auth)
 	char raServerUsername[64];  // Server's internal username (from avatar URL, used for sync hash)
@@ -229,7 +232,6 @@ typedef struct
 // RetroAchievements defaults
 #define CFG_DEFAULT_RA_ENABLE false
 #define CFG_DEFAULT_RA_USERNAME ""
-#define CFG_DEFAULT_RA_PASSWORD ""
 #define CFG_DEFAULT_RA_HARDCOREMODE false
 #define CFG_DEFAULT_RA_TOKEN ""
 #define CFG_DEFAULT_RA_SERVER_USERNAME ""
@@ -380,6 +382,9 @@ bool CFG_getRAEnable(void);
 void CFG_setRAEnable(bool enable);
 const char* CFG_getRAUsername(void);
 void CFG_setRAUsername(const char* username);
+// The password is transient (RAM only) — never written to disk and gone on
+// reboot. It exists solely to feed the one-time token exchange. Returns "" if
+// unset/cleared.
 const char* CFG_getRAPassword(void);
 void CFG_setRAPassword(const char* password);
 bool CFG_getRAHardcoreMode(void);

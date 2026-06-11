@@ -497,6 +497,51 @@ static const char* ra_sync_state_str(RASyncState s) {
 }
 
 /*****************************************************************************
+ * Helper: Centralized "server rejected our credentials" handling
+ *
+ * Reached from two places: the login callback (token rejected at login time)
+ * and the RC_CLIENT_EVENT_SERVER_ERROR handler (any rc_client API call —
+ * award, leaderboard submit, ping, start-session — failing with an auth
+ * error). Without a stored password there is nothing to silently re-auth
+ * with, so the only recovery is the user re-authenticating in Settings.
+ *
+ * Clears the dead token, flips the authenticated flag (persisted, so the
+ * main-menu Settings status reflects it), forces the login state machine to
+ * FAILED so we stop retrying, and notifies the user — once. The notification
+ * is in-game (minarch raises it); the re-auth action lives in Settings.
+ *****************************************************************************/
+
+// True for the rc error codes that mean "the server rejected the credentials"
+// (as opposed to a transient network/server failure, which should retry).
+static bool ra_is_auth_error(int result) {
+	return result == RC_INVALID_CREDENTIALS ||
+	       result == RC_EXPIRED_TOKEN ||
+	       result == RC_ACCESS_DENIED;
+}
+
+// Debounce: set once we've told the user to re-auth, cleared on a successful
+// login so a later expiry notifies again. Avoids spamming the toast when many
+// API calls fail in quick succession.
+static bool ra_auth_rejected_notified = false;
+
+static void ra_handle_auth_rejected(int result, const char* context) {
+	RA_LOG_ERROR("Auth rejected (result=%d) during %s — clearing token\n",
+	             result, context ? context : "unknown");
+	CFG_setRAToken("");
+	CFG_setRAAuthenticated(false);
+	ra_reset_login_retry();
+	ra_login_state = LOGIN_FAILED;
+	RA_LOG_DEBUG("[SM] Login: → %s (credentials rejected)\n",
+	             ra_login_state_str(ra_get_login_state()));
+
+	if (!ra_auth_rejected_notified) {
+		ra_auth_rejected_notified = true;
+		Notification_push(NOTIFICATION_ACHIEVEMENT,
+		                  "RetroAchievements: sign in again in Settings", NULL);
+	}
+}
+
+/*****************************************************************************
  * Helper: Start a login attempt
  *****************************************************************************/
 static void ra_start_login(void) {
@@ -1412,12 +1457,23 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 		break;
 		
 	case RC_CLIENT_EVENT_SERVER_ERROR:
-		RA_LOG_ERROR("Server error: %s\n",
+		RA_LOG_ERROR("Server error (api=%s, result=%d): %s\n",
+		       event->server_error ? event->server_error->api : "unknown",
+		       event->server_error ? event->server_error->result : 0,
 		       event->server_error ? event->server_error->error_message : "unknown");
-		// Show notification for server errors
-		snprintf(message, sizeof(message), "RA Server Error: %s",
-		         event->server_error ? event->server_error->error_message : "unknown");
-		Notification_push(NOTIFICATION_ACHIEVEMENT, message, NULL);
+		if (event->server_error && ra_is_auth_error(event->server_error->result)) {
+			// An API call (award, leaderboard, ping, session…) was rejected
+			// because our credentials are no longer valid. Funnel through the
+			// shared handler: clear the token, mark unauthenticated, and prompt
+			// the user (once) to re-authenticate in Settings.
+			ra_handle_auth_rejected(event->server_error->result,
+			                        event->server_error->api);
+		} else {
+			// Generic/transient server error — surface it but keep credentials.
+			snprintf(message, sizeof(message), "RA Server Error: %s",
+			         event->server_error ? event->server_error->error_message : "unknown");
+			Notification_push(NOTIFICATION_ACHIEVEMENT, message, NULL);
+		}
 		break;
 		
 	case RC_CLIENT_EVENT_DISCONNECTED:
@@ -1507,6 +1563,7 @@ static void ra_login_callback(int result, const char* error_message,
 	if (result == RC_OK) {
 		// Success — transition to LOGGED_IN
 		ra_reset_login_retry();
+		ra_auth_rejected_notified = false;  // re-arm re-auth toast for next expiry
 		ra_login_state = LOGIN_LOGGED_IN;
 		RA_LOG_DEBUG("[SM] Login: → %s\n", ra_login_state_str(ra_get_login_state()));
 		
@@ -1525,10 +1582,20 @@ static void ra_login_callback(int result, const char* error_message,
 			// ra_game_loaded_callback.  If the load fails (e.g., offline cache
 			// miss), the pending info is preserved for retry.
 		}
+	} else if (ra_is_auth_error(result)) {
+		// The stored token was rejected by the server (expired, revoked, or the
+		// account password was changed). Retrying won't help — there is no
+		// password on device to silently mint a new token. Clear it and prompt
+		// the user to re-authenticate in Settings.
+		ra_handle_auth_rejected(result, "login");
+		if (ra_game_state == GAME_PENDING_LOGIN) {
+			ra_game_state = GAME_NONE;
+			ra_clear_pending_game();
+		}
 	} else {
-		// Failure — schedule retry or give up
+		// Transient failure (network/server) — schedule retry or give up
 		RA_LOG_ERROR("Login failed: %s\n", error_message ? error_message : "unknown error");
-		
+
 		if (ra_login_retry.count < RA_LOGIN_MAX_RETRIES) {
 			// Schedule retry — transition to RETRY_WAITING
 			uint32_t delay = ra_get_retry_delay_ms(ra_login_retry.count);
