@@ -169,12 +169,27 @@ static char* sync_build_post_data(const char* username,
  * 
  * Success: response contains "Success":true (with or without space after colon)
  * Already unlocked: response contains "User already has" — treated as success
- * 
- * Returns: 1 = success, 0 = server rejection (skip), -1 = network/parse error
+ *
+ * Returns: 1 = success, 0 = per-unlock failure (skip, stays pending, keep
+ *          going), -1 = genuine network failure (no response at all — stop).
+ *
+ * Only a missing response object (connection refused, DNS failure, timeout)
+ * counts as a network failure that halts the whole batch. A response that
+ * arrives but is bad (non-200 status, empty/garbled body, or a 200 the server
+ * didn't accept) is a per-unlock problem: other unlocks in the same batch may
+ * submit fine, so we skip this one and continue rather than hard-stopping and
+ * reverting the entire device to offline mode (which the caller does on -1).
  */
 static int sync_parse_response(HTTP_Response* resp) {
-	if (!resp || resp->http_status != 200 || !resp->data || resp->size == 0) {
+	/* No response object at all → genuine network failure → stop the batch. */
+	if (!resp) {
 		return -1;
+	}
+
+	/* We heard back from the server; a bad response is this unlock's problem,
+	 * not a connectivity loss → skip it (stays pending) and keep going. */
+	if (resp->http_status != 200 || !resp->data || resp->size == 0) {
+		return 0;
 	}
 
 	/* Check for success: "Success":true (with or without space) */

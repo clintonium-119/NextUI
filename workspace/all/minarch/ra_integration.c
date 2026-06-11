@@ -124,6 +124,31 @@ static uint32_t ra_muted_achievements[RA_MAX_MUTED_ACHIEVEMENTS];
 static int ra_muted_count = 0;
 static bool ra_muted_dirty = false;  // Track if mute state needs saving
 
+// Snapshot of achievements already unlocked (server-side) when the game loads.
+// In encore mode rcheevos re-activates these so they trigger again for the
+// player, but they're already credited on the server. Writing such a re-trigger
+// to the offline ledger would create a phantom "pending" unlock that pointlessly
+// re-submits on the next launch (the server rejects it as already-owned). We use
+// this snapshot to skip the ledger write for re-triggers of already-earned
+// achievements — see ra_was_unlocked_at_load().
+#define RA_MAX_UNLOCKED_AT_LOAD 1024
+static uint32_t ra_unlocked_at_load[RA_MAX_UNLOCKED_AT_LOAD];
+static uint8_t  ra_unlocked_at_load_mode[RA_MAX_UNLOCKED_AT_LOAD]; // RC_CLIENT_ACHIEVEMENT_UNLOCKED_* bits at load
+static int ra_unlocked_at_load_count = 0;
+
+// Original server unlock timestamps, parsed from the startsession response's
+// "Unlocks"/"HardcoreUnlocks" arrays. Encore mode zeroes rcheevos' public
+// unlock_time (it re-activates unlocked achievements as if not yet earned), so
+// we recover the real earn time here and restore it for the detail-page date.
+typedef struct {
+	uint32_t id;
+	uint32_t softcore_when;  // "When" from the "Unlocks" array (0 = absent)
+	uint32_t hardcore_when;  // "When" from the "HardcoreUnlocks" array (0 = absent)
+} RAUnlockTime;
+#define RA_MAX_UNLOCK_TIMES RA_MAX_UNLOCKED_AT_LOAD
+static RAUnlockTime ra_unlock_times[RA_MAX_UNLOCK_TIMES];
+static int ra_unlock_times_count = 0;
+
 // Memory access function pointers (set by minarch)
 static RA_GetMemoryFunc ra_get_memory_data = NULL;
 static RA_GetMemorySizeFunc ra_get_memory_size = NULL;
@@ -167,6 +192,16 @@ static RALoginRetry ra_login_retry = {0};
 #define RA_PROBE_INTERVAL_MS  30000  // 30 seconds between probe attempts
 #define RA_PROBE_SLEEP_CHUNK_MS 200  // Sleep granularity for abort responsiveness
 
+// Offline-sync failure backoff. A failed sync reverts the device to offline
+// and relaunches the connectivity probe; the probe reconnects within ~1s and
+// re-triggers the sync. Without a cooldown, an unlock the server keeps
+// erroring on would loop every second forever, spamming sync notifications.
+// Back off exponentially per consecutive failure, then stop auto-retrying
+// after a cap (a fresh game load resets the counter and tries again).
+#define RA_SYNC_FAIL_MAX        5      // give up auto-retry after this many consecutive failures
+#define RA_SYNC_BACKOFF_BASE_MS 2000   // first backoff delay; doubles each failure
+#define RA_SYNC_BACKOFF_MAX_MS  60000  // cap on a single backoff interval
+
 // Lightweight WiFi state polling (detects drops without hitting RA server)
 #define RA_WIFI_POLL_INTERVAL_MS 5000  // Check wpa_cli status every 5 seconds
 
@@ -191,6 +226,8 @@ static bool ra_sync_apply_pending = false;            /* sync results waiting to
 static uint32_t ra_sync_apply_ids[RA_EVQ_MAX_SYNC_IDS];
 static uint32_t ra_sync_apply_timestamps[RA_EVQ_MAX_SYNC_IDS];
 static uint32_t ra_sync_apply_count = 0;
+static uint32_t ra_sync_fail_count = 0;               /* consecutive sync failures (backoff) */
+static uint32_t ra_sync_retry_after = 0;              /* SDL_GetTicks() gate before next sync attempt */
 
 // Probe lifecycle mutex — protects ra_probe_running check-and-set.
 // Separate from the event queue mutex.  Held only briefly for the
@@ -752,6 +789,164 @@ static void ra_load_muted_achievements(void) {
 	RA_LOG_DEBUG("Loaded %d muted achievements for game %s\n", ra_muted_count, ra_game_hash);
 }
 
+/** Find (or create) the unlock-time map entry for an achievement id. */
+static RAUnlockTime* ra_unlock_time_entry(uint32_t id) {
+	for (int i = 0; i < ra_unlock_times_count; i++) {
+		if (ra_unlock_times[i].id == id) {
+			return &ra_unlock_times[i];
+		}
+	}
+	if (ra_unlock_times_count >= RA_MAX_UNLOCK_TIMES) {
+		return NULL;
+	}
+	RAUnlockTime* e = &ra_unlock_times[ra_unlock_times_count++];
+	e->id = id;
+	e->softcore_when = 0;
+	e->hardcore_when = 0;
+	return e;
+}
+
+/**
+ * Parse one JSON unlock array (e.g. "\"Unlocks\"" or "\"HardcoreUnlocks\"") out
+ * of a startsession body, recording each {"ID":n,...,"When":n} into the map.
+ * `body` must be NUL-terminated (as the HTTP/cache layers provide). Robust to
+ * field ordering within an object; "Unlocks" won't false-match inside
+ * "HardcoreUnlocks" because the search key includes the leading quote.
+ */
+static void ra_parse_unlock_array(const char* body, const char* array_key, bool hardcore) {
+	const char* key = strstr(body, array_key);
+	if (!key) return;
+	const char* arr = strchr(key + strlen(array_key), '[');
+	if (!arr) return;
+	const char* end = strchr(arr, ']');
+	if (!end) return;
+
+	const char* obj = arr;
+	while ((obj = strchr(obj, '{')) != NULL && obj < end) {
+		const char* obj_end = strchr(obj, '}');
+		if (!obj_end || obj_end > end) break;
+
+		uint32_t id = 0, when = 0;
+		const char* id_pos = strstr(obj, "\"ID\":");
+		if (id_pos && id_pos < obj_end) id = (uint32_t)strtoul(id_pos + 5, NULL, 10);
+		const char* when_pos = strstr(obj, "\"When\":");
+		if (when_pos && when_pos < obj_end) when = (uint32_t)strtoul(when_pos + 7, NULL, 10);
+
+		if (id > 0) {
+			RAUnlockTime* e = ra_unlock_time_entry(id);
+			if (e) {
+				if (hardcore) e->hardcore_when = when;
+				else          e->softcore_when = when;
+			}
+		}
+		obj = obj_end + 1;
+	}
+}
+
+/**
+ * Capture original unlock timestamps from a startsession response body so the
+ * detail page can show the unlock date even in encore mode. Resets and rebuilds
+ * the map; called once per game load (online response or offline cache hit).
+ */
+static void ra_capture_unlock_times(const char* body) {
+	if (!body) return;
+	ra_unlock_times_count = 0;
+	ra_parse_unlock_array(body, "\"Unlocks\"", false);
+	ra_parse_unlock_array(body, "\"HardcoreUnlocks\"", true);
+	RA_LOG_DEBUG("Captured unlock timestamps for %d achievement(s) from startsession\n",
+	             ra_unlock_times_count);
+}
+
+/**
+ * Look up the original unlock timestamp for an achievement. Mirrors rcheevos'
+ * own choice (hardcore time when in hardcore, else softcore), falling back to
+ * whichever is present. Returns 0 if unknown.
+ */
+static uint32_t ra_lookup_unlock_time(uint32_t id, bool hardcore) {
+	for (int i = 0; i < ra_unlock_times_count; i++) {
+		if (ra_unlock_times[i].id != id) continue;
+		uint32_t hc = ra_unlock_times[i].hardcore_when;
+		uint32_t sc = ra_unlock_times[i].softcore_when;
+		if (hardcore) return hc ? hc : sc;
+		return sc ? sc : hc;
+	}
+	return 0;
+}
+
+/**
+ * Snapshot the set of achievements rcheevos reports as already unlocked
+ * (server-side) at game load. Called once after the game finishes loading,
+ * before any frame is processed. Used to suppress offline-ledger writes for
+ * encore-mode re-triggers of already-earned achievements (which carry no new
+ * credit). The `unlocked` bitfield reflects the server unlock state even in
+ * encore mode (encore only resets `state` back to ACTIVE), so this is a
+ * reliable "was this already earned" signal.
+ */
+static void ra_snapshot_unlocked_at_load(rc_client_t* client) {
+	ra_unlocked_at_load_count = 0;
+	if (!client) return;
+
+	rc_client_achievement_list_t* list = rc_client_create_achievement_list(
+		client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE,
+		RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
+	if (!list) return;
+
+	bool hardcore = rc_client_get_hardcore_enabled(client) != 0;
+	for (uint32_t b = 0; b < list->num_buckets; b++) {
+		for (uint32_t a = 0; a < list->buckets[b].num_achievements; a++) {
+			const rc_client_achievement_t* ach = list->buckets[b].achievements[a];
+			if (!ach || !ach->unlocked) continue;
+
+			if (ra_unlocked_at_load_count < RA_MAX_UNLOCKED_AT_LOAD) {
+				ra_unlocked_at_load[ra_unlocked_at_load_count] = ach->id;
+				ra_unlocked_at_load_mode[ra_unlocked_at_load_count] = ach->unlocked;
+				ra_unlocked_at_load_count++;
+			}
+
+			// Encore mode leaves public unlock_time at 0 (the achievement is
+			// re-activated). Restore the original earn time from the startsession
+			// timestamps so the detail page still shows the unlock date.
+			if (ach->unlock_time == 0) {
+				uint32_t when = ra_lookup_unlock_time(ach->id, hardcore);
+				if (when > 0) {
+					// Cast away const: the achievement list points at rcheevos'
+					// real structs; setting the display field is safe on the main
+					// thread (same pattern as the deferred sync-apply path).
+					((rc_client_achievement_t*)ach)->unlock_time = (time_t)when;
+				}
+			}
+		}
+	}
+	rc_client_destroy_achievement_list(list);
+
+	RA_LOG_INFO("Snapshot: %d achievement(s) already unlocked at load "
+	            "(encore re-triggers won't be queued for offline sync)\n",
+	            ra_unlocked_at_load_count);
+}
+
+/**
+ * True if re-triggering `achievement_id` in the current mode grants no new
+ * server credit — i.e., it was already unlocked at load in a way that covers
+ * the current session. Such re-triggers (encore mode) must not be queued for
+ * offline sync. Re-earning in hardcore an achievement that was only softcore
+ * at load DOES grant new (hardcore) credit, so that returns false.
+ */
+static bool ra_retrigger_grants_no_credit(uint32_t achievement_id, bool hardcore) {
+	for (int i = 0; i < ra_unlocked_at_load_count; i++) {
+		if (ra_unlocked_at_load[i] != achievement_id) {
+			continue;
+		}
+		uint8_t mode = ra_unlocked_at_load_mode[i];
+		if (hardcore) {
+			// New hardcore credit only if it wasn't already a hardcore unlock.
+			return (mode & RC_CLIENT_ACHIEVEMENT_UNLOCKED_HARDCORE) != 0;
+		}
+		// Softcore session: any prior unlock already covers softcore credit.
+		return mode != RC_CLIENT_ACHIEVEMENT_UNLOCKED_NONE;
+	}
+	return false;  // wasn't unlocked at load → genuinely new
+}
+
 /*****************************************************************************
  * Helper: Save muted achievements to file
  *****************************************************************************/
@@ -1131,6 +1326,14 @@ static void ra_http_callback(HTTP_Response* response, void* userdata) {
 		}
 	}
 	
+	// Capture original unlock timestamps from the startsession (after patching,
+	// so injected offline unlocks are included) — encore mode zeroes rcheevos'
+	// unlock_time, and this lets the detail page still show the unlock date.
+	if (body && http_status == 200 &&
+	    data->post_data && strstr(data->post_data, "r=startsession")) {
+		ra_capture_unlock_times(body);
+	}
+
 	// Queue the response for main thread processing
 	// The queue makes a copy of the body, so we can free the response after
 	if (!ra_queue_push(body, body_length, http_status, data->callback, data->callback_data)) {
@@ -1171,6 +1374,11 @@ static void ra_server_call(const rc_api_request_t* request,
 			// Cache hit - deliver cached response via queue
 			RA_LOG_DEBUG("Offline cache hit: %s (%zu bytes)\n",
 			             req_type ? req_type : "unknown", cached_len);
+			// Capture unlock timestamps from a cached startsession too, so the
+			// detail-page date works in encore mode even on a fully-offline boot.
+			if (req_type && strcmp(req_type, "startsession") == 0) {
+				ra_capture_unlock_times(cached_body);
+			}
 			if (!ra_queue_push(cached_body, cached_len, 200, callback, callback_data)) {
 				RA_LOG_WARN("Failed to queue cached response\n");
 			}
@@ -1362,11 +1570,32 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 		       RA_Offline_isOffline(), RA_Offline_isSyncing(),
 		       (long long)time(NULL));
 		
+		// Encore mode re-triggers achievements that were already unlocked on the
+		// server at load. A re-trigger that grants no new credit ("re-credit")
+		// must not touch the offline ledger, and rcheevos has just overwritten
+		// unlock_time with "now" while re-awarding it — restore the original
+		// server earn time so the detail page keeps showing the real date rather
+		// than the moment of re-trigger.
+		{
+		bool hardcore = rc_client_get_hardcore_enabled(client) != 0;
+		bool encore_recredit = ra_retrigger_grants_no_credit(event->achievement->id, hardcore);
+		if (encore_recredit) {
+			uint32_t orig = ra_lookup_unlock_time(event->achievement->id, hardcore);
+			if (orig > 0) {
+				// Cast away const: list/event point at rcheevos' real structs;
+				// updating the display field on the main thread is safe (same
+				// pattern as the snapshot and deferred sync-apply paths).
+				((rc_client_achievement_t*)event->achievement)->unlock_time = (time_t)orig;
+			}
+		}
+
 		// Write-ahead log: persist unlock to ledger (survives app crash).
-		// Skip entirely in spectator mode — rcheevos won't submit, so the
-		// ledger would queue forever and the UI would render every unlock
-		// as offline-pending.
-		if (!rc_client_get_spectator_mode_enabled(client)) {
+		// Skip in spectator mode (rcheevos won't submit, so the ledger would
+		// queue forever) and for encore re-credits (queuing one would create a
+		// phantom "pending" unlock the server rejects as already-owned on the
+		// next launch's sync). Only WAL a trigger that earns something new
+		// (locked at load, or a hardcore upgrade of a softcore-only unlock).
+		if (!rc_client_get_spectator_mode_enabled(client) && !encore_recredit) {
 			const rc_client_game_t* game = rc_client_get_game_info(client);
 			if (game) {
 				RA_Offline_ledgerWriteUnlock(game->id, event->achievement->id,
@@ -1377,9 +1606,15 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 				// indicator is already in place; sync engine clears it on success)
 				RA_Offline_addPendingCacheEntry(event->achievement->id);
 			}
+		} else if (encore_recredit) {
+			RA_LOG_INFO("[AWARD_TRIGGER] ach=%u already credited at load "
+			            "(encore re-trigger, hardcore=%d) — not queuing for "
+			            "offline sync, restored original unlock time\n",
+			            event->achievement->id, hardcore);
+		}
 		}
 		break;
-		
+
 	case RC_CLIENT_EVENT_ACHIEVEMENT_CHALLENGE_INDICATOR_SHOW:
 		RA_LOG_DEBUG("Challenge started: %s\n", event->achievement->title);
 		break;
@@ -1793,20 +2028,26 @@ static int ra_sync_thread_func(void* data) {
 		RA_EVQ_post(&sync_ev);
 	}
 	
-	// Show completion in top-left progress area, then auto-hide
+	// Show completion in top-left progress area, then auto-hide.
+	// Only surface actionable outcomes: a real network failure (will retry) or
+	// achievements actually synced. A "skipped" result means the server rejected
+	// an unlock that nonetheless stays pending — for a permanently-rejected entry
+	// that recurs on every launch, so we don't toast it (the offline indicator in
+	// the RA menu already reflects it). Just hide the progress indicator.
 	{
 		char msg[NOTIFICATION_MAX_MESSAGE];
+		bool show = true;
 		if (result.failed > 0) {
 			snprintf(msg, sizeof(msg), "Sync incomplete: %u synced, will retry later",
 			         result.synced);
 		} else if (result.synced > 0) {
 			snprintf(msg, sizeof(msg), "Synced %u offline achievement%s",
 			         result.synced, result.synced == 1 ? "" : "s");
-		} else if (result.skipped > 0) {
-			snprintf(msg, sizeof(msg), "Sync: %u achievement%s skipped",
-			         result.skipped, result.skipped == 1 ? "" : "s");
+		} else {
+			// skip-only or nothing done — nothing worth a per-launch toast.
+			show = false;
 		}
-		if (result.synced > 0 || result.failed > 0 || result.skipped > 0) {
+		if (show) {
 			// Show first (resets start_time), THEN clear persistent.
 			// Reversed order risks a TOCTOU race: the main thread's
 			// Notification_update could see persistent=false with the old
@@ -2095,6 +2336,11 @@ static void ra_game_loaded_callback(int result, const char* error_message,
 		const rc_client_game_t* game = rc_client_get_game_info(client);
 		ra_game_state = GAME_LOADED;
 		RA_LOG_DEBUG("[SM] Game: → %s\n", ra_game_state_str(ra_get_game_state()));
+
+		// Fresh game load — reset the offline-sync failure backoff so a game
+		// that gave up last session gets another chance.
+		ra_sync_fail_count = 0;
+		ra_sync_retry_after = 0;
 		
 		// Game loaded successfully — clear pending load info (no longer needed
 		// for retry).  Must happen before any early returns below.
@@ -2121,7 +2367,12 @@ static void ra_game_loaded_callback(int result, const char* error_message,
 			// Initialize badge cache and prefetch achievement badges
 			RA_Badges_init();
 			ra_prefetch_badges(client);
-			
+
+			// Snapshot which achievements are already unlocked on the server
+			// (before any gameplay this session). Used to skip offline-ledger
+			// writes for encore-mode re-triggers — see ra_was_unlocked_at_load().
+			ra_snapshot_unlocked_at_load(client);
+
 			// Show achievement summary (includes offline unlock augmentation
 			// and filtered achievement hiding)
 			ra_show_game_summary(client, game);
@@ -2307,7 +2558,12 @@ void RA_init(void) {
 	} else {
 		rc_client_set_hardcore_enabled(ra_client, CFG_getRAHardcoreMode() ? 1 : 0);
 	}
-	
+
+	// Configure encore mode from settings. Unlike hardcore, encore is
+	// independent of online state — it only governs whether already-unlocked
+	// achievements are re-activated so they can trigger again on replay.
+	rc_client_set_encore_mode_enabled(ra_client, CFG_getRAEncoreMode() ? 1 : 0);
+
 	// Reset login/game state before attempting
 	ra_login_state = LOGIN_IDLE;
 	ra_game_state = GAME_NONE;
@@ -2706,7 +2962,11 @@ static void action_probe_online(const RAEvent* ev) {
  */
 static void action_sync_done(const RAEvent* ev) {
 	RA_LOG_INFO("[SM] action_sync_done: count=%u\n", ev->data.sync_done.count);
-	
+
+	// Progress was made — clear the failure backoff.
+	ra_sync_fail_count = 0;
+	ra_sync_retry_after = 0;
+
 	ra_sync_apply_pending = true;
 	ra_sync_apply_count = ev->data.sync_done.count;
 	if (ev->data.sync_done.count > 0) {
@@ -2742,9 +3002,24 @@ static void action_sync_done(const RAEvent* ev) {
 static void action_sync_failed(const RAEvent* ev) {
 	(void)ev;
 	RA_LOG_WARN("[SM] action_sync_failed: reverting to offline mode\n");
-	
+
 	ra_user_saw_offline = true;
 	ra_deferred_offline_notification = true;
+
+	// Arm exponential backoff so the next reconnect doesn't immediately
+	// re-attempt a sync that just failed (prevents the sync→probe→reconnect→
+	// sync hot loop). The deferred-sync dispatcher honors ra_sync_retry_after
+	// and gives up entirely once ra_sync_fail_count hits RA_SYNC_FAIL_MAX.
+	ra_sync_fail_count++;
+	uint32_t shift = ra_sync_fail_count - 1;
+	if (shift > 20) shift = 20;  // guard against UB / overflow on <<
+	uint32_t delay = RA_SYNC_BACKOFF_BASE_MS << shift;
+	if (delay > RA_SYNC_BACKOFF_MAX_MS || delay < RA_SYNC_BACKOFF_BASE_MS) {
+		delay = RA_SYNC_BACKOFF_MAX_MS;
+	}
+	ra_sync_retry_after = SDL_GetTicks() + delay;
+	RA_LOG_WARN("[SM] sync backoff: failure %u/%u, next attempt in %ums\n",
+	            ra_sync_fail_count, RA_SYNC_FAIL_MAX, delay);
 
 	if (ra_client) {
 		rc_client_set_hardcore_enabled(ra_client, 0);
@@ -2819,9 +3094,22 @@ static void ra_process_deferred_flags(void) {
 		// before the game loads, those records are gone before rcheevos can
 		// use them, causing the just-synced achievement to appear locked.
 		if (gs == GAME_LOADED) {
-			ra_deferred_sync_pending = false;
-			const rc_client_game_t* g = rc_client_get_game_info(ra_client);
-			ra_start_offline_sync(g ? g->id : 0);
+			if (ra_sync_fail_count >= RA_SYNC_FAIL_MAX) {
+				// Repeated failures — stop auto-retrying this session. A fresh
+				// game load resets the counter and gives it another chance.
+				RA_LOG_WARN("[DEFERRED] sync giving up after %u consecutive "
+				            "failures — will retry on next game load\n",
+				            ra_sync_fail_count);
+				ra_deferred_sync_pending = false;
+			} else if (ra_sync_retry_after != 0 &&
+			           SDL_GetTicks() < ra_sync_retry_after) {
+				// Backoff still active — leave the flag set and try again
+				// after the cooldown elapses.
+			} else {
+				ra_deferred_sync_pending = false;
+				const rc_client_game_t* g = rc_client_get_game_info(ra_client);
+				ra_start_offline_sync(g ? g->id : 0);
+			}
 		}
 		// else: stays pending until game loads
 	}

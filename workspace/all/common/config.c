@@ -85,6 +85,7 @@ void CFG_defaults(NextUISettings *cfg)
         .raEnable = CFG_DEFAULT_RA_ENABLE,
         .raUsername = CFG_DEFAULT_RA_USERNAME,
         .raHardcoreMode = CFG_DEFAULT_RA_HARDCOREMODE,
+        .raEncoreMode = CFG_DEFAULT_RA_ENCORE_MODE,
         .raToken = CFG_DEFAULT_RA_TOKEN,
         .raServerUsername = CFG_DEFAULT_RA_SERVER_USERNAME,
         .raAuthenticated = CFG_DEFAULT_RA_AUTHENTICATED,
@@ -379,6 +380,11 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb)
             if (sscanf(line, "raHardcoreMode=%i", &temp_value) == 1)
             {
                 CFG_setRAHardcoreMode((bool)temp_value);
+                continue;
+            }
+            if (sscanf(line, "raEncoreMode=%i", &temp_value) == 1)
+            {
+                CFG_setRAEncoreMode((bool)temp_value);
                 continue;
             }
             if (strncmp(line, "raToken=", 8) == 0)
@@ -1000,6 +1006,17 @@ void CFG_setRAHardcoreMode(bool enable)
     CFG_sync();
 }
 
+bool CFG_getRAEncoreMode(void)
+{
+    return settings.raEncoreMode;
+}
+
+void CFG_setRAEncoreMode(bool enable)
+{
+    settings.raEncoreMode = enable;
+    CFG_sync();
+}
+
 const char* CFG_getRAToken(void)
 {
     return settings.raToken;
@@ -1316,6 +1333,10 @@ void CFG_get(const char *key, char *value)
     {
         sprintf(value, "%i", (int)(CFG_getRAHardcoreMode()));
     }
+    else if (strcmp(key, "raEncoreMode") == 0)
+    {
+        sprintf(value, "%i", (int)(CFG_getRAEncoreMode()));
+    }
     else if (strcmp(key, "raToken") == 0)
     {
         sprintf(value, "%s", CFG_getRAToken());
@@ -1434,6 +1455,7 @@ void CFG_sync(void)
     fprintf(file, "raUsername=%s\n", settings.raUsername);
     // raPassword intentionally not persisted (transient/RAM only).
     fprintf(file, "raHardcoreMode=%i\n", settings.raHardcoreMode);
+    fprintf(file, "raEncoreMode=%i\n", settings.raEncoreMode);
     fprintf(file, "raToken=%s\n", settings.raToken);
     fprintf(file, "raServerUsername=%s\n", settings.raServerUsername);
     fprintf(file, "raAuthenticated=%i\n", settings.raAuthenticated);
@@ -1500,6 +1522,7 @@ void CFG_print(void)
     printf("\t\"raEnable\": %i,\n", settings.raEnable);
     printf("\t\"raUsername\": \"%s\",\n", settings.raUsername);
     printf("\t\"raHardcoreMode\": %i,\n", settings.raHardcoreMode);
+    printf("\t\"raEncoreMode\": %i,\n", settings.raEncoreMode);
     // Don't print the RA token verbatim — it's bearer-equivalent to the
     // password. Report only whether one is set.
     printf("\t\"raToken\": \"%s\",\n", settings.raToken[0] ? "<set>" : "<unset>");
