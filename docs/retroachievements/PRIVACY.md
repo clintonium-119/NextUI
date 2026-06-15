@@ -37,23 +37,31 @@ your SD card:
 | Field | Location | Purpose | Lifetime |
 |---|---|---|---|
 | RA username | `minui.cfg` (`raUsername=`) | Pre-fills the login screen on next launch | Until you log out or clear the field |
-| RA password | `minui.cfg` (`raPassword=`) | Re-authentication if the session token expires | Until you log out or clear the field |
-| RA session token | `minui.cfg` (`raToken=`) | Avoids re-sending password on each launch | Until logout or RA-server-side expiry |
+| RA session token | `minui.cfg` (`raToken=`) | Avoids re-sending the password on each launch | Until logout or RA-server-side expiry |
 | RA canonical username | `minui.cfg` (`raServerUsername=`) | Display in UI; sourced from RA login response | Same as token |
 | Authenticated flag | `minui.cfg` (`raAuthenticated=`) | UI state | Same as token |
 | Hardcore-mode flag | `minui.cfg` (`raHardcoreMode=`) | User preference | Until changed |
+| Encore-mode flag | `minui.cfg` (`raEncoreMode=`) | User preference | Until changed |
+| Challenge-indicator flag | `minui.cfg` (`raShowChallengeIndicators=`) | User preference | Until changed |
 | Achievement-set cache | `Saves/.userdata/[platform]/.ra/offline/cache/` | Lets achievements work without an active connection | Until manually deleted or overwritten by a fresh fetch |
 | Offline unlock ledger | `Saves/.userdata/[platform]/.ra/offline/ledger.bin` | Append-only, hash-chained durable queue of achievements unlocked while offline (softcore and hardcore) so they sync later; survives crashes and reboots | Compacted on successful sync; fully deleted when no pending entries remain |
 | Badge images | `Saves/.userdata/[platform]/.ra/badges/` | Displayed in achievement notifications and lists | Until manually deleted |
 
-**Plaintext storage of the password.** The password is stored
-unencrypted on the SD card. NextUI runs on hardware without any secure
-enclave, OS-level keychain, or trusted-storage facility; encrypting at
-rest with a key also stored on the same SD card would not provide
-meaningful protection. Users who do not wish to store a password on the
-device can clear the password field after first login — the session
-token alone is sufficient for ongoing use until it expires server-side.
-Source: `workspace/all/common/config.c` (search `raPassword`).
+**Credential handling.** Your RA password is **never written to the SD
+card.** During login (Tools → Settings → RetroAchievements) it is held
+in memory only, exchanged with the RA server for a session token, and
+then discarded; only the token is persisted (`raToken=` above). If an
+older NextUI build had saved a plaintext `raPassword=` line, the current
+build removes it from the settings file on first launch.
+
+The session token *is* stored unencrypted. It is bearer-equivalent —
+anyone with the token can act as your RA session until it expires — but
+NextUI runs on hardware without a secure enclave, OS keychain, or
+trusted-storage facility, so encrypting it with a key kept on the same
+SD card would not provide meaningful protection. Log out (Tools →
+Settings → RetroAchievements) to clear the stored token. The token is
+also redacted from the settings debug dump. Source:
+`workspace/all/common/config.c` (search `raPassword` / `raToken`).
 
 **Source-of-truth file paths and field names** above are taken directly
 from the source: `workspace/all/common/config.c` (config keys),

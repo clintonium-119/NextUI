@@ -319,12 +319,28 @@ seconds:
   [`HARDCORE_MODE.md`](../../HARDCORE_MODE.md) Phase 1.4 design notes
   — and avoids spamming a load-blocked notification on every hardcore
   game launch.
-- **Plaintext password storage:** documented in
-  [`PRIVACY.md`](./PRIVACY.md) §"What NextUI stores locally". Standard
-  for handheld emulators without secure-element hardware; the user can
-  clear the password field after first login.
+- **Credential storage:** the RA password is never written to disk — it
+  is held in memory only during login, exchanged for a session token,
+  then discarded (and a legacy plaintext `raPassword=` line from an older
+  build is purged on first launch). Only the session token is persisted;
+  it is stored unencrypted and is bearer-equivalent, standard for
+  handheld emulators without secure-element hardware. The token is
+  redacted from the settings debug dump, and the user can log out to
+  clear it. Documented in [`PRIVACY.md`](./PRIVACY.md) §"What NextUI
+  stores locally".
 - **Rich Presence in pause menu:** rcheevos's `rc_client_idle()` is
   driven from the same loop that feeds the pause menu, so RP pings
   continue while the menu is open. [VERIFY: confirm by inspecting
   rcheevos worker behaviour during long pause-menu sessions before
   submission.]
+- **Encore Mode and Challenge Indicators (shipped, fairness-neutral):**
+  NextUI exposes RA's Encore Mode (Settings → RetroAchievements →
+  Encore Mode) via `rc_client_set_encore_mode_enabled`. Re-triggering an
+  already-earned achievement grants no new server credit — the server
+  reports it as already owned — and a genuinely new unlock during encore
+  play still obeys the normal hardcore restrictions. A separate "Show
+  Challenge Indicators" toggle displays a lower-right trophy pill and
+  pins active-challenge rows in the achievement list, driven purely by
+  rcheevos's `CHALLENGE_INDICATOR_SHOW/HIDE` events; it is display-only
+  and confers no gameplay advantage. Neither feature relaxes a hardcore
+  restriction.
