@@ -1,6 +1,6 @@
 # NextUI Privacy Policy — RetroAchievements Integration
 
-**Last updated:** 2026-06-09
+**Last updated:** 2026-06-12
 **Applies to:** NextUI v6.12.0 and later, on all supported platforms (Trimui Brick, Smart Pro, Smart Pro S).
 
 This policy describes the personal data NextUI handles when its
