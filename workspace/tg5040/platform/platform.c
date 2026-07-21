@@ -25,17 +25,18 @@
 #include <dirent.h>
 
 int is_brick = 0;
+int is_brickpro = 0;
 void PLAT_initPlatform(void) {
 	// TODO: replace with something that doesnt bleed out of tg5040 scope
 	char *device = getenv("DEVICE");
 	is_brick = exactMatch("brick", device);
+	is_brickpro = exactMatch("brickpro", device);
 }
 
 static SDL_Joystick **joysticks = NULL;
 static int num_joysticks = 0;
 void PLAT_initInput(void) {
-	char* device = getenv("DEVICE");
-	is_brick = exactMatch("brick", device);
+	PLAT_initPlatform();
 	if(SDL_InitSubSystem(SDL_INIT_JOYSTICK) < 0)
 		LOG_error("Failed initializing joysticks: %s\n", SDL_GetError());
 	num_joysticks = SDL_NumJoysticks();
@@ -188,9 +189,42 @@ void PLAT_getBatteryStatusFine(int *is_charging, int *charge)
 	}
 }
 
+int PLAT_isUSBConnected(void)
+{
+	// The UDC (USB Device Controller) reports "configured" once a host has
+	// enumerated us as a USB gadget. This is independent of merely being
+	// plugged into a charger, so it lets us tell "connected to a computer"
+	// apart from "connected to power".
+	DIR *dir = opendir("/sys/class/udc");
+	if (!dir)
+		return 0;
+
+	int connected = 0;
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != NULL)
+	{
+		if (entry->d_name[0] == '.')
+			continue;
+
+		char path[512];
+		snprintf(path, sizeof(path), "/sys/class/udc/%s/state", entry->d_name);
+
+		char state[32] = {0};
+		getFile(path, state, sizeof(state));
+		if (strncmp(state, "configured", 10) == 0)
+		{
+			connected = 1;
+			break;
+		}
+	}
+
+	closedir(dir);
+	return connected;
+}
+
 void PLAT_enableBacklight(int enable) {
 	if (enable) {
-		if (is_brick) SetRawBrightness(8);
+		if (is_brick || is_brickpro) SetRawBrightness(8);
 		SetBrightness(GetBrightness());
 	}
 	else {
@@ -311,7 +345,8 @@ void PLAT_setCPUSpeed(int speed) {
 
 #define MAX_STRENGTH 0xFFFF
 #define MIN_VOLTAGE 500000
-#define MAX_VOLTAGE 3300000
+// Brick Pro has a 3.3V motor driver, but its getting very annoying on higher rumble strengths, so we limit it to 2.5V for now.
+#define MAX_VOLTAGE (is_brickpro ? 2500000 : 3300000)
 #define RUMBLE_PATH "/sys/class/gpio/gpio227/value"
 #define RUMBLE_VOLTAGE_PATH "/sys/class/motor/voltage"
 
@@ -373,119 +408,38 @@ ConnectionStrength PLAT_connectionStrength(void) {
 }
 
 void PLAT_initDefaultLeds() {
-	char* device = getenv("DEVICE");
-	is_brick = exactMatch("brick", device);
-	if(is_brick) {
-	lightsDefault[0] = (LightSettings) {
-		"FN 1 key",
-		"f1",
-		4,
-		1000,
-		100,
-		0xFFFFFF,
-		0xFFFFFF,
-		0,
-		{},
-		1,
-		100,
-		0
-	};
-	lightsDefault[1] = (LightSettings) {
-		"FN 2 key",
-		"f2",
-		4,
-		1000,
-		100,
-		0xFFFFFF,
-		0xFFFFFF,
-		0,
-		{},
-		1,
-		100,
-		0
-	};
-	lightsDefault[2] = (LightSettings) {
-		"Topbar",
-		"m",
-		4,
-		1000,
-		100,
-		0xFFFFFF,
-		0xFFFFFF,
-		0,
-		{},
-		1,
-		100,
-		0
-	};
-	lightsDefault[3] = (LightSettings) {
-		"L/R triggers",
-		"lr",
-		4,
-		1000,
-		100,
-		0xFFFFFF,
-		0xFFFFFF,
-		0,
-		{},
-		1,
-		100,
-		0
-	};
-} else {
-	lightsDefault[0] = (LightSettings) {
-		"Joystick L",
-		"l",
-		4,
-		1000,
-		100,
-		0xFFFFFF,
-		0xFFFFFF,
-		0,
-		{},
-		1,
-		100,
-		0
-	};
-	lightsDefault[1] = (LightSettings) {
-		"Joystick R",
-		"r",
-		4,
-		1000,
-		100,
-		0xFFFFFF,
-		0xFFFFFF,
-		0,
-		{},
-		1,
-		100,
-		0
-	};
-	lightsDefault[2] = (LightSettings) {
-		"Logo",
-		"m",
-		4,
-		1000,
-		100,
-		0xFFFFFF,
-		0xFFFFFF,
-		0,
-		{},
-		1,
-		100,
-		0
-	};
-}
+	PLAT_initPlatform();
+	if(is_brickpro) {
+		lightsDefault[0] = (LightSettings) {"FN 1 key","f1",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		lightsDefault[1] = (LightSettings) {"FN 2 key","f2",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		lightsDefault[2] = (LightSettings) {"Topbar","m",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		lightsDefault[3] = (LightSettings) {"Joysticks L/R","lr",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		//lightsDefault[4] = (LightSettings) {"Joystick L","l",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		//lightsDefault[5] = (LightSettings) {"Joystick R","r",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		lightsDefault[4] = (LightSettings) {"Triggers L/R","rear",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+	}
+	else if(is_brick) {
+		lightsDefault[0] = (LightSettings) {"FN 1 key","f1",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		lightsDefault[1] = (LightSettings) {"FN 2 key","f2",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		lightsDefault[2] = (LightSettings) {"Topbar","m",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		lightsDefault[3] = (LightSettings) {"L/R triggers","lr",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		//lightsDefault[3] = (LightSettings) {"L trigger","l",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		//lightsDefault[3] = (LightSettings) {"R trigger","r",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+	} else {
+		lightsDefault[0] = (LightSettings) {"Joystick L","l",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		lightsDefault[1] = (LightSettings) {"Joystick R","r",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+		lightsDefault[2] = (LightSettings) {"Logo","m",4,1000,100,0xFFFFFF,0xFFFFFF,0,{},1,100,0};
+	}
 }
 void PLAT_initLeds(LightSettings *lights) 
 {
-	char* device = getenv("DEVICE");
-	is_brick = exactMatch("brick", device);
-
 	PLAT_initDefaultLeds();
 	FILE *file;
 	if(is_brick) {
 		file = PLAT_OpenSettings("ledsettings_brick.txt");
+	}
+	else if(is_brickpro) {
+		file = PLAT_OpenSettings("ledsettings_brickpro.txt");
 	}
 	else {
 		file = PLAT_OpenSettings("ledsettings.txt");
@@ -572,16 +526,29 @@ void PLAT_initLeds(LightSettings *lights)
 	}
 }
 
+// Brick: Brightness for "m" (top bar)
+// Brick Pro: Brightness for "m" (top bar)?
+// Smart Pro/S: Global brightness for all
 #define LED_PATH1 "/sys/class/led_anim/max_scale"
+// Brick: Brightness for "lr" (triggers)
+// Brick Pro: Brightness for "lr" (joysticks)?
+// Smart Pro/S: n/a
 #define LED_PATH2 "/sys/class/led_anim/max_scale_lr"
-#define LED_PATH3 "/sys/class/led_anim/max_scale_f1f2" 
+// Brick: Brightness for "f1f2" (buttons)
+// Brick Pro: Brightness for "f1f2" (buttons)?
+// Smart Pro/S: n/a
+#define LED_PATH3 "/sys/class/led_anim/max_scale_f1f2"
+// Brick: n/a
+// Brick Pro: Brightness for "rear" (triggers)
+// Smart Pro/S: n/a 
+#define LED_PATH4 "/sys/class/led_anim/max_scale_rear" 
 
 void PLAT_setLedInbrightness(LightSettings *led)
 {
     char filepath[256];
     FILE *file;
     // first set brightness
-	if(is_brick) {
+	if(is_brick || is_brickpro) {
 		if (strcmp(led->filename, "m") == 0) {
 			snprintf(filepath, sizeof(filepath), LED_PATH1);
 		} else if (strcmp(led->filename, "f1") == 0) {
@@ -607,7 +574,7 @@ void PLAT_setLedBrightness(LightSettings *led)
     char filepath[256];
     FILE *file;
     // first set brightness
-	if(is_brick) {
+	if(is_brick || is_brickpro) {
 		if (strcmp(led->filename, "m") == 0) {
 			snprintf(filepath, sizeof(filepath), "/sys/class/led_anim/max_scale");
 		} else if (strcmp(led->filename, "f1") == 0) {

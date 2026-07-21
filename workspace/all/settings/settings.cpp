@@ -5,11 +5,13 @@ extern "C"
 #include "defines.h"
 #include "api.h"
 #include "utils.h"
+#include "displaycal.h"
 #include "ra_auth.h"
 #include "ra_sync.h"
 }
 
 #include <csignal>
+#include <cstdlib>
 #include <dirent.h>
 #include <fstream>
 #include <memory>
@@ -23,6 +25,8 @@ extern "C"
 #include "btmenu.hpp"
 #include "keyboardprompt.hpp"
 #include "colorpickermenu.hpp"
+#include "palettemenu.hpp"
+#include "fnbuttonmenu.hpp"
 
 #define BUSYBOX_STOCK_VERSION "1.27.2"
 
@@ -148,6 +152,14 @@ static const std::vector<std::string> progress_duration_labels = {"Off", "1s", "
 static const std::vector<std::any>    transition_mode_values = {(int)TRANSITION_OFF, (int)TRANSITION_SNAPPY, (int)TRANSITION_COMFY};
 static const std::vector<std::string> transition_mode_labels = {"Off", "Snappy", "Comfy"};
 
+// Game switcher curtain opacity options (0-100)
+static const std::vector<std::any>    curtain_opacity_values = {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100};
+static const std::vector<std::string> curtain_opacity_labels = {"Off", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"};
+
+// Input prompt style options
+static const std::vector<std::any>    input_prompt_style_values = {(int)INPUT_STYLE_TEXT, (int)INPUT_STYLE_ABXY, (int)INPUT_STYLE_CARDINALS, (int)INPUT_STYLE_SHAPES};
+static const std::vector<std::string> input_prompt_style_labels = {"Text", "ABXY", "Cardinals", "Shapes"};
+
 // RetroAchievements sort order options
 static const std::vector<std::any> ra_sort_values = {
     (int)RA_SORT_UNLOCKED_FIRST,
@@ -179,12 +191,12 @@ static const std::vector<std::string> ra_sort_labels = {
 namespace {
     struct ColorDef { int id; const char *name; const char *desc; uint32_t defaultColor; };
     static const ColorDef g_colorDefs[] = {
-        {1, "Main Color",             "The color used to render main UI elements.",                         CFG_DEFAULT_COLOR1},
+        {1, "Main Color",             "The color used to render main UI elements.",                          CFG_DEFAULT_COLOR1},
         {2, "Primary Accent Color",   "The color used to highlight important things in the user interface.", CFG_DEFAULT_COLOR2},
         {3, "Secondary Accent Color", "A secondary highlight color.",                                        CFG_DEFAULT_COLOR3},
-        {6, "Hint info Color",        "Color for button hints and info",                                     CFG_DEFAULT_COLOR6},
         {4, "List Text",              "List text color",                                                     CFG_DEFAULT_COLOR4},
         {5, "List Text Selected",     "List selected text color",                                            CFG_DEFAULT_COLOR5},
+        {6, "Hint info Color",        "Color for button hints and info",                                     CFG_DEFAULT_COLOR6},
         {7, "Background Color",       "Background color used when no background image is set.",              CFG_DEFAULT_COLOR7},
     };
 
@@ -235,6 +247,7 @@ namespace {
         enum Model {
             UnknownModel,
             Brick,
+            BrickPro,
             SmartPro,
             SmartProS,
             Flip
@@ -253,6 +266,10 @@ namespace {
                 if(exactMatch("brick", device)) {
                     m_vendor = Trimui;
                     m_model = Brick;
+                    m_platform = tg5040;
+                } else if(exactMatch("brickpro", device)) {
+                    m_vendor = Trimui;
+                    m_model = BrickPro;
                     m_platform = tg5040;
                 } else if(exactMatch("smartpro", device)) {
                     m_vendor = Trimui;
@@ -286,6 +303,10 @@ namespace {
             return m_platform == tg5040;
         }
 
+        bool hasDisplayCal() const {
+            return m_platform == tg5040;
+        }
+
         bool hasActiveCooling() const {
             return m_platform == tg5050;
         }
@@ -295,7 +316,7 @@ namespace {
         }
 
         bool hasAnalogSticks() const {
-            return m_model == SmartPro || m_model == SmartProS;
+            return m_model == SmartPro || m_model == SmartProS || m_model == BrickPro;
         }
 
         bool hasWifi() const {
@@ -352,9 +373,10 @@ int main(int argc, char *argv[])
             tz_labels.push_back(std::string(timezones[i]));
         }
 
-        // Factory helpers to avoid repeating identical lambda boilerplate for each picker
+        // Factory helpers to avoid repeating identical lambda boilerplate for each picker.
+        // Editing an individual color detaches from any predefined palette ("Custom").
         auto makeColorSetter = [](int id) -> ValueSetCallback {
-            return [id](const std::any &v){ CFG_setColor(id, std::any_cast<uint32_t>(v)); };
+            return [id](const std::any &v){ CFG_setColor(id, std::any_cast<uint32_t>(v)); CFG_clearPalette(); };
         };
         auto makeColorOpener = [](ColorPickerMenu *picker, int id, std::string name) -> MenuListCallback {
             return [picker, id, name](AbstractMenuItem &item) -> InputReactionHint {
@@ -366,10 +388,10 @@ int main(int argc, char *argv[])
             return [id]() -> std::any { return CFG_getColor(id); };
         };
         auto makeColorResetter = [](int id, uint32_t defaultColor) -> ValueResetCallback {
-            return [id, defaultColor]() { CFG_setColor(id, defaultColor); };
+            return [id, defaultColor]() { CFG_setColor(id, defaultColor); CFG_clearPalette(); };
         };
 
-        // Pre-create one RGB picker per color setting (reused across opens)
+        // Pre-create one RGBA picker per color setting (reused across opens)
         std::vector<std::unique_ptr<ColorPickerMenu>> pickers;
         pickers.reserve(std::size(g_colorDefs));
         for (const auto &def : g_colorDefs)
@@ -407,6 +429,7 @@ int main(int argc, char *argv[])
             []() -> std::any { return CFG_getFontStyle(); },
             [](const std::any &value) { CFG_setFontStyle(std::any_cast<int>(value)); },
             []() { CFG_setFontStyle(CFG_DEFAULT_FONT_STYLE); }});
+        appearanceItems.push_back(buildPaletteMenuItem());
         for (auto *item : colorMenuItems)
             appearanceItems.push_back(item);
         appearanceItems.push_back(new MenuItem{ListItemType::Generic, "Show battery percentage", "Show battery level as percent in the status pill", {false, true}, on_off,
@@ -454,6 +477,14 @@ int main(int argc, char *argv[])
             []() -> std::any{ return CFG_getShowQuickswitcherUI(); },
             [](const std::any &value){ CFG_setShowQuickswitcherUI(std::any_cast<bool>(value)); },
             []() { CFG_setShowQuickswitcherUI(CFG_DEFAULT_SHOWQUICKWITCHERUI);}});
+        appearanceItems.push_back(new MenuItem{ListItemType::Generic, "Game switcher curtain opacity", "Show/hide curtain overlay. Helps UI elements to \nstand out when using transparent backgrounds.", curtain_opacity_values, curtain_opacity_labels, 
+            []() -> std::any{ return CFG_getGameSwitcherCurtain(); },
+            [](const std::any &value){ CFG_setGameSwitcherCurtain(std::any_cast<int>(value)); },
+            []() { CFG_setGameSwitcherCurtain(CFG_DEFAULT_GAMESWITCHER_CURTAIN);}});
+        appearanceItems.push_back(new MenuItem{ListItemType::Generic, "Input prompt style", "Select the style of input prompts.", input_prompt_style_values, input_prompt_style_labels,
+            []() -> std::any{ return CFG_getInputPromptStyle(); },
+            [](const std::any &value){ CFG_setInputPromptStyle(std::any_cast<int>(value)); },
+            []() { CFG_setInputPromptStyle(CFG_DEFAULT_INPUT_PROMPT_STYLE);}});
         // not needed anymore
         // new MenuItem{ListItemType::Generic, "Game switcher scaling", "The scaling algorithm used to display the savegame image.", scaling, scaling_strings, []() -> std::any
         // { return CFG_getGameSwitcherScaling(); },
@@ -501,6 +532,33 @@ int main(int argc, char *argv[])
                 { return GetExposure(); }, [](const std::any &value)
                 { SetExposure(std::any_cast<int>(value)); },
                 []() { SetExposure(SETTINGS_DEFAULT_EXPOSURE);}});
+        }
+        if(deviceInfo.hasDisplayCal())
+        {
+            const DisplayCalDefaults defaultDisplayCal = DisplayCal_getDefaultSettings(
+                deviceInfo.getModel() == DeviceInfo::Brick ? DISPLAYCAL_PRESET_BRICK : 
+                deviceInfo.getModel() == DeviceInfo::BrickPro ? DISPLAYCAL_PRESET_BRICKPRO :
+                deviceInfo.getModel() == DeviceInfo::SmartPro ? DISPLAYCAL_PRESET_SMARTPRO : DISPLAYCAL_PRESET_DEFAULT);
+            displayItems.push_back(
+                new MenuItem{ListItemType::Generic, "White point correction", "Corrects the display white point to better match the \nsRGB standard, at the expense of some peak brightness.", {false, true}, on_off, []() -> std::any
+                { return GetDisplayCalEnabled() != 0; }, [](const std::any &value)
+                { SetDisplayCalEnabled(std::any_cast<bool>(value)); },
+                [defaultDisplayCal]() { SetDisplayCalEnabled(defaultDisplayCal.enabled); }});
+            displayItems.push_back(
+                new MenuItem{ListItemType::Generic, "Red gain", "White point correction red channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                { return GetDisplayCalRedGain(); }, [](const std::any &value)
+                { SetDisplayCalRedGain(std::any_cast<int>(value)); },
+                [defaultDisplayCal]() { SetDisplayCalRedGain(defaultDisplayCal.red_gain); }});
+            displayItems.push_back(
+                new MenuItem{ListItemType::Generic, "Green gain", "White point correction green channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                { return GetDisplayCalGreenGain(); }, [](const std::any &value)
+                { SetDisplayCalGreenGain(std::any_cast<int>(value)); },
+                [defaultDisplayCal]() { SetDisplayCalGreenGain(defaultDisplayCal.green_gain); }});
+            displayItems.push_back(
+                new MenuItem{ListItemType::Generic, "Blue gain", "White point correction blue channel gain (0 to 200)", DISPLAYCAL_GAIN_MIN, DISPLAYCAL_GAIN_MAX, "", []() -> std::any
+                { return GetDisplayCalBlueGain(); }, [](const std::any &value)
+                { SetDisplayCalBlueGain(std::any_cast<int>(value)); },
+                [defaultDisplayCal]() { SetDisplayCalBlueGain(defaultDisplayCal.blue_gain); }});
         }
         displayItems.push_back(
             new MenuItem{ListItemType::Button, "Reset to defaults", "Resets all options in this menu to their default values.", ResetCurrentMenu});
@@ -575,6 +633,13 @@ int main(int argc, char *argv[])
                 []() -> std::any { return CFG_getPowerOffProtection(); },
                 [](const std::any &value) { CFG_setPowerOffProtection(std::any_cast<bool>(value)); },
                 []() { CFG_setPowerOffProtection(CFG_DEFAULT_POWEROFFPROTECTION); }}
+            );
+
+            systemItems.push_back(
+                new MenuItem{ListItemType::Generic, "Keep awake over USB", "Prevent screen-off and sleep while connected to a\ncomputer as a USB device (not just charging).", {false, true}, on_off,
+                []() -> std::any { return CFG_getKeepAwakeWhenUSB(); },
+                [](const std::any &value) { CFG_setKeepAwakeWhenUSB(std::any_cast<bool>(value)); },
+                []() { CFG_setKeepAwakeWhenUSB(CFG_DEFAULT_KEEPAWAKEWHENUSB); }}
             );
         }
 
@@ -1026,6 +1091,8 @@ int main(int argc, char *argv[])
             },
         });
 
+        MenuList *buttonMenu = buildFnButtonMenu(); // nullptr if this device has none
+
         std::vector<AbstractMenuItem*> mainItems = {
             new MenuItem{ListItemType::Generic, "Appearance", "UI customization", {}, {}, nullptr, nullptr, DeferToSubmenu, appearanceMenu},
             new MenuItem{ListItemType::Generic, "Display", "", {}, {}, nullptr, nullptr, DeferToSubmenu, displayMenu},
@@ -1035,6 +1102,9 @@ int main(int argc, char *argv[])
         if(deviceInfo.hasMuteToggle())
             mainItems.push_back(new MenuItem{ListItemType::Generic, "FN switch", "FN switch settings", {}, {}, nullptr, nullptr, DeferToSubmenu,
                 new MenuList(MenuItemType::Fixed, "FN Switch", muteItems)});
+
+        if(buttonMenu)
+            mainItems.push_back(new MenuItem{ListItemType::Generic, "Assignments", "Customize button assignments", {}, {}, nullptr, nullptr, DeferToSubmenu, buttonMenu});
 
         mainItems.push_back(new MenuItem{ListItemType::Generic, "In-Game", "In-game settings for MinArch", {}, {}, nullptr, nullptr, DeferToSubmenu, minarchMenu});
 
@@ -1096,7 +1166,7 @@ int main(int argc, char *argv[])
                     SDL_BlitSurface(bgbmp, NULL, ctx.screen, &image_rect);
                 } else {
                     uint32_t bgc = CFG_getColor(COLOR_BACKGROUND);
-                    SDL_FillRect(ctx.screen, NULL, SDL_MapRGB(ctx.screen->format, (bgc >> 16) & 0xFF, (bgc >> 8) & 0xFF, bgc & 0xFF));
+                    SDL_FillRect(ctx.screen, NULL, SDL_MapRGBA(ctx.screen->format, (bgc >> 24) & 0xFF, (bgc >> 16) & 0xFF, (bgc >> 8) & 0xFF, bgc & 0xFF));
                 }
 
                 int ow = 0;
