@@ -118,6 +118,18 @@ static uint32_t ra_muted_achievements[RA_MAX_MUTED_ACHIEVEMENTS];
 static int ra_muted_count = 0;
 static bool ra_muted_dirty = false;  // Track if mute state needs saving
 
+// Snapshot of achievements already unlocked (server-side) when the game loads.
+// In encore mode rcheevos re-activates these so they trigger again for the
+// player, but they're already credited on the server. Writing such a re-trigger
+// to the offline ledger would create a phantom "pending" unlock that pointlessly
+// re-submits on the next launch (the server rejects it as already-owned). We use
+// this snapshot to skip the ledger write for re-triggers of already-earned
+// achievements — see ra_retrigger_grants_no_credit().
+#define RA_MAX_UNLOCKED_AT_LOAD 1024
+static uint32_t ra_unlocked_at_load[RA_MAX_UNLOCKED_AT_LOAD];
+static uint8_t  ra_unlocked_at_load_mode[RA_MAX_UNLOCKED_AT_LOAD]; // RC_CLIENT_ACHIEVEMENT_UNLOCKED_* bits at load
+static int ra_unlocked_at_load_count = 0;
+
 // Memory access function pointers (set by minarch)
 static RA_GetMemoryFunc ra_get_memory_data = NULL;
 static RA_GetMemorySizeFunc ra_get_memory_size = NULL;
@@ -701,6 +713,76 @@ static void ra_load_muted_achievements(void) {
 	
 	fclose(f);
 	RA_LOG_DEBUG("Loaded %d muted achievements for game %s\n", ra_muted_count, ra_game_hash);
+}
+
+/**
+ * Snapshot the set of achievements rcheevos reports as already unlocked
+ * (server-side) at game load. Called once after the game finishes loading,
+ * before any frame is processed. Used to suppress offline-ledger writes for
+ * encore-mode re-triggers of already-earned achievements (which carry no new
+ * credit). The `unlocked` bitfield reflects the server unlock state even in
+ * encore mode (encore only resets `state` back to ACTIVE), so this is a
+ * reliable "was this already earned" signal.
+ */
+static void ra_snapshot_unlocked_at_load(rc_client_t* client) {
+	ra_unlocked_at_load_count = 0;
+	if (!client) return;
+
+	rc_client_achievement_list_t* list = rc_client_create_achievement_list(
+		client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE,
+		RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
+	if (!list) return;
+
+	int unlocked_seen = 0;
+	for (uint32_t b = 0; b < list->num_buckets; b++) {
+		for (uint32_t a = 0; a < list->buckets[b].num_achievements; a++) {
+			const rc_client_achievement_t* ach = list->buckets[b].achievements[a];
+			if (!ach || !ach->unlocked) continue;
+			unlocked_seen++;
+
+			if (ra_unlocked_at_load_count < RA_MAX_UNLOCKED_AT_LOAD) {
+				ra_unlocked_at_load[ra_unlocked_at_load_count] = ach->id;
+				ra_unlocked_at_load_mode[ra_unlocked_at_load_count] = ach->unlocked;
+				ra_unlocked_at_load_count++;
+			}
+		}
+	}
+	rc_client_destroy_achievement_list(list);
+
+	if (unlocked_seen > RA_MAX_UNLOCKED_AT_LOAD) {
+		// Truncated rather than silently wrong: the overflow ids aren't in the
+		// snapshot, so their encore re-triggers still reach the offline ledger.
+		RA_LOG_WARN("Snapshot truncated at RA_MAX_UNLOCKED_AT_LOAD (%d): %d "
+		            "achievement(s) already unlocked at load\n",
+		            RA_MAX_UNLOCKED_AT_LOAD, unlocked_seen);
+	}
+
+	RA_LOG_INFO("Snapshot: %d achievement(s) already unlocked at load "
+	            "(encore re-triggers won't be queued for offline sync)\n",
+	            ra_unlocked_at_load_count);
+}
+
+/**
+ * True if re-triggering `achievement_id` in the current mode grants no new
+ * server credit — i.e., it was already unlocked at load in a way that covers
+ * the current session. Such re-triggers (encore mode) must not be queued for
+ * offline sync. Re-earning in hardcore an achievement that was only softcore
+ * at load DOES grant new (hardcore) credit, so that returns false.
+ */
+static bool ra_retrigger_grants_no_credit(uint32_t achievement_id, bool hardcore) {
+	for (int i = 0; i < ra_unlocked_at_load_count; i++) {
+		if (ra_unlocked_at_load[i] != achievement_id) {
+			continue;
+		}
+		uint8_t mode = ra_unlocked_at_load_mode[i];
+		if (hardcore) {
+			// New hardcore credit only if it wasn't already a hardcore unlock.
+			return (mode & RC_CLIENT_ACHIEVEMENT_UNLOCKED_HARDCORE) != 0;
+		}
+		// Softcore session: any prior unlock already covers softcore credit.
+		return mode != RC_CLIENT_ACHIEVEMENT_UNLOCKED_NONE;
+	}
+	return false;  // wasn't unlocked at load → genuinely new
 }
 
 /*****************************************************************************
@@ -1301,8 +1383,19 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 		       RA_Offline_isOffline(), RA_Offline_isSyncing(),
 		       (long long)time(NULL));
 		
-		// Write-ahead log: persist unlock to ledger (survives app crash)
+		// Encore mode re-triggers achievements that were already unlocked on the
+		// server at load. A re-trigger that grants no new credit ("re-credit")
+		// must not touch the offline ledger.
 		{
+		bool hardcore = rc_client_get_hardcore_enabled(client) != 0;
+		bool encore_recredit = ra_retrigger_grants_no_credit(event->achievement->id, hardcore);
+
+		// Write-ahead log: persist unlock to ledger (survives app crash).
+		// Skip encore re-credits: queuing one would create a phantom "pending"
+		// unlock the server rejects as already-owned on the next launch's sync.
+		// Only WAL a trigger that earns something new (locked at load, or a
+		// hardcore upgrade of a softcore-only unlock).
+		if (!encore_recredit) {
 			const rc_client_game_t* game = rc_client_get_game_info(client);
 			if (game) {
 				RA_Offline_ledgerWriteUnlock(game->id, event->achievement->id,
@@ -1313,6 +1406,12 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 				// indicator is already in place; sync engine clears it on success)
 				RA_Offline_addPendingCacheEntry(event->achievement->id);
 			}
+		} else {
+			RA_LOG_INFO("[AWARD_TRIGGER] ach=%u already credited at load "
+			            "(encore re-trigger, hardcore=%d) — not queuing for "
+			            "offline sync\n",
+			            event->achievement->id, hardcore);
+		}
 		}
 		break;
 		
@@ -1992,6 +2091,11 @@ static void ra_game_loaded_callback(int result, const char* error_message,
 			// Initialize badge cache and prefetch achievement badges
 			RA_Badges_init();
 			ra_prefetch_badges(client);
+			
+			// Snapshot which achievements are already unlocked on the server
+			// (before any gameplay this session). Used to skip offline-ledger
+			// writes for encore-mode re-triggers — see ra_retrigger_grants_no_credit().
+			ra_snapshot_unlocked_at_load(client);
 			
 			// Show achievement summary (includes offline unlock augmentation
 			// and filtered achievement hiding)
