@@ -183,6 +183,7 @@ typedef struct
 	char raUsername[64];
 	char raPassword[128];
 	bool raHardcoreMode;
+	bool raEncoreMode;          // Re-activate already-unlocked achievements on replay
 	char raToken[64];           // API token (stored after successful auth)
 	char raServerUsername[64];  // Server's internal username (from avatar URL, used for sync hash)
 	bool raAuthenticated;       // Whether we have a valid token
@@ -263,6 +264,7 @@ typedef struct
 #define CFG_DEFAULT_RA_USERNAME ""
 #define CFG_DEFAULT_RA_PASSWORD ""
 #define CFG_DEFAULT_RA_HARDCOREMODE false
+#define CFG_DEFAULT_RA_ENCORE_MODE false
 #define CFG_DEFAULT_RA_TOKEN ""
 #define CFG_DEFAULT_RA_SERVER_USERNAME ""
 #define CFG_DEFAULT_RA_AUTHENTICATED false
@@ -455,6 +457,8 @@ const char* CFG_getRAPassword(void);
 void CFG_setRAPassword(const char* password);
 bool CFG_getRAHardcoreMode(void);
 void CFG_setRAHardcoreMode(bool enable);
+bool CFG_getRAEncoreMode(void);
+void CFG_setRAEncoreMode(bool enable);
 const char* CFG_getRAToken(void);
 void CFG_setRAToken(const char* token);
 const char* CFG_getRAServerUsername(void);

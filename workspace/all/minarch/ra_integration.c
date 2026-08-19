@@ -2164,6 +2164,11 @@ void RA_init(void) {
 	} else {
 		rc_client_set_hardcore_enabled(ra_client, CFG_getRAHardcoreMode() ? 1 : 0);
 	}
+
+	// Configure encore mode from settings. Unlike hardcore, encore is
+	// independent of online state — it only governs whether already-unlocked
+	// achievements are re-activated so they can trigger again on replay.
+	rc_client_set_encore_mode_enabled(ra_client, CFG_getRAEncoreMode() ? 1 : 0);
 	
 	// Reset login/game state before attempting
 	ra_login_state = LOGIN_IDLE;
