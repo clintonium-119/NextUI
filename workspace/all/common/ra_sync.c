@@ -153,11 +153,23 @@ static char* sync_build_post_data(const char* username,
  * Success: response contains "Success":true (with or without space after colon)
  * Already unlocked: response contains "User already has" — treated as success
  * 
- * Returns: 1 = success, 0 = server rejection (skip), -1 = network/parse error
+ * Returns: 1 = success, 0 = skip this unlock (stays pending), -1 = network
+ * failure (never reached the server — stop the batch)
  */
 static int sync_parse_response(HTTP_Response* resp) {
-	if (!resp || resp->http_status != 200 || !resp->data || resp->size == 0) {
+	/* No response object, or curl never got an HTTP status back at all
+	   (http.c leaves http_status at -1 on transport failure: no route, DNS
+	   failure, TLS error, timeout).  That is a genuine connectivity loss —
+	   stop the batch. */
+	if (!resp || resp->http_status <= 0) {
 		return -1;
+	}
+
+	/* The server answered with a real HTTP status.  An unusable answer is this
+	   unlock's problem, not a connectivity loss -> skip it (stays pending) and
+	   keep going. */
+	if (resp->http_status != 200 || !resp->data || resp->size == 0) {
+		return 0;
 	}
 
 	/* Check for success: "Success":true (with or without space) */
