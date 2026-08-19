@@ -130,6 +130,20 @@ static uint32_t ra_unlocked_at_load[RA_MAX_UNLOCKED_AT_LOAD];
 static uint8_t  ra_unlocked_at_load_mode[RA_MAX_UNLOCKED_AT_LOAD]; // RC_CLIENT_ACHIEVEMENT_UNLOCKED_* bits at load
 static int ra_unlocked_at_load_count = 0;
 
+// Original server unlock timestamps, parsed from the startsession response's
+// "Unlocks"/"HardcoreUnlocks" arrays. Encore mode zeroes rcheevos' public
+// unlock_time (it re-activates unlocked achievements as if not yet earned), so
+// we recover the real earn time here and restore it for the detail-page date.
+typedef struct {
+	uint32_t id;
+	uint32_t softcore_when;  // "When" from the "Unlocks" array (0 = absent)
+	uint32_t hardcore_when;  // "When" from the "HardcoreUnlocks" array (0 = absent)
+} RAUnlockTime;
+#define RA_MAX_UNLOCK_TIMES RA_MAX_UNLOCKED_AT_LOAD
+static RAUnlockTime ra_unlock_times[RA_MAX_UNLOCK_TIMES];
+static int ra_unlock_times_count = 0;
+static bool ra_unlock_times_full_warned = false;
+
 // Memory access function pointers (set by minarch)
 static RA_GetMemoryFunc ra_get_memory_data = NULL;
 static RA_GetMemorySizeFunc ra_get_memory_size = NULL;
@@ -715,6 +729,106 @@ static void ra_load_muted_achievements(void) {
 	RA_LOG_DEBUG("Loaded %d muted achievements for game %s\n", ra_muted_count, ra_game_hash);
 }
 
+/** Find (or create) the unlock-time map entry for an achievement id. */
+static RAUnlockTime* ra_unlock_time_entry(uint32_t id) {
+	for (int i = 0; i < ra_unlock_times_count; i++) {
+		if (ra_unlock_times[i].id == id) {
+			return &ra_unlock_times[i];
+		}
+	}
+	if (ra_unlock_times_count >= RA_MAX_UNLOCK_TIMES) {
+		// Warn once per capture, not once per dropped entry. Beyond the cap the
+		// date simply stays unknown; every caller must handle NULL.
+		if (!ra_unlock_times_full_warned) {
+			ra_unlock_times_full_warned = true;
+			RA_LOG_WARN("Unlock-time map full at RA_MAX_UNLOCK_TIMES (%d) — "
+			            "further startsession timestamps dropped\n",
+			            RA_MAX_UNLOCK_TIMES);
+		}
+		return NULL;
+	}
+	RAUnlockTime* e = &ra_unlock_times[ra_unlock_times_count++];
+	e->id = id;
+	e->softcore_when = 0;
+	e->hardcore_when = 0;
+	return e;
+}
+
+/**
+ * Parse one JSON unlock array (e.g. "\"Unlocks\"" or "\"HardcoreUnlocks\"") out
+ * of a startsession body, recording each {"ID":n,...,"When":n} into the map.
+ * `body` must be NUL-terminated, which both producers guarantee (http.c's
+ * response buffer and ra_offline.c's cache reader each write a terminator past
+ * the payload). Robust to field ordering within an object; "Unlocks" won't
+ * false-match inside "HardcoreUnlocks" because the search key includes the
+ * leading quote.
+ */
+static void ra_parse_unlock_array(const char* body, const char* array_key, bool hardcore) {
+	const char* key = strstr(body, array_key);
+	if (!key) return;
+	const char* arr = strchr(key + strlen(array_key), '[');
+	if (!arr) return;
+	const char* end = strchr(arr, ']');
+	if (!end) return;
+
+	const char* obj = arr;
+	while ((obj = strchr(obj, '{')) != NULL && obj < end) {
+		const char* obj_end = strchr(obj, '}');
+		if (!obj_end || obj_end > end) break;
+
+		uint32_t id = 0, when = 0;
+		const char* id_pos = strstr(obj, "\"ID\":");
+		if (id_pos && id_pos < obj_end) id = (uint32_t)strtoul(id_pos + 5, NULL, 10);
+		const char* when_pos = strstr(obj, "\"When\":");
+		if (when_pos && when_pos < obj_end) when = (uint32_t)strtoul(when_pos + 7, NULL, 10);
+
+		if (id > 0) {
+			RAUnlockTime* e = ra_unlock_time_entry(id);
+			if (e) {
+				if (hardcore) e->hardcore_when = when;
+				else          e->softcore_when = when;
+			}
+		}
+		obj = obj_end + 1;
+	}
+}
+
+/**
+ * Capture original unlock timestamps from a startsession response body so the
+ * detail page can show the unlock date even in encore mode. Resets and rebuilds
+ * the map; called once per game load (online response or offline cache hit).
+ *
+ * Runs on the HTTP worker thread from ra_http_callback, while the reads in
+ * ra_snapshot_unlocked_at_load and the achievement-triggered handler are on the
+ * main thread. Both reads happen-before via the response queue this capture
+ * precedes.
+ */
+static void ra_capture_unlock_times(const char* body) {
+	if (!body) return;
+	ra_unlock_times_count = 0;
+	ra_unlock_times_full_warned = false;
+	ra_parse_unlock_array(body, "\"Unlocks\"", false);
+	ra_parse_unlock_array(body, "\"HardcoreUnlocks\"", true);
+	RA_LOG_DEBUG("Captured unlock timestamps for %d achievement(s) from startsession\n",
+	             ra_unlock_times_count);
+}
+
+/**
+ * Look up the original unlock timestamp for an achievement. Mirrors rcheevos'
+ * own choice (hardcore time when in hardcore, else softcore), falling back to
+ * whichever is present. Returns 0 if unknown.
+ */
+static uint32_t ra_lookup_unlock_time(uint32_t id, bool hardcore) {
+	for (int i = 0; i < ra_unlock_times_count; i++) {
+		if (ra_unlock_times[i].id != id) continue;
+		uint32_t hc = ra_unlock_times[i].hardcore_when;
+		uint32_t sc = ra_unlock_times[i].softcore_when;
+		if (hardcore) return hc ? hc : sc;
+		return sc ? sc : hc;
+	}
+	return 0;
+}
+
 /**
  * Snapshot the set of achievements rcheevos reports as already unlocked
  * (server-side) at game load. Called once after the game finishes loading,
@@ -733,6 +847,7 @@ static void ra_snapshot_unlocked_at_load(rc_client_t* client) {
 		RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
 	if (!list) return;
 
+	bool hardcore = rc_client_get_hardcore_enabled(client) != 0;
 	int unlocked_seen = 0;
 	for (uint32_t b = 0; b < list->num_buckets; b++) {
 		for (uint32_t a = 0; a < list->buckets[b].num_achievements; a++) {
@@ -744,6 +859,19 @@ static void ra_snapshot_unlocked_at_load(rc_client_t* client) {
 				ra_unlocked_at_load[ra_unlocked_at_load_count] = ach->id;
 				ra_unlocked_at_load_mode[ra_unlocked_at_load_count] = ach->unlocked;
 				ra_unlocked_at_load_count++;
+			}
+
+			// Encore mode leaves public unlock_time at 0 (the achievement is
+			// re-activated). Restore the original earn time from the startsession
+			// timestamps so the detail page still shows the unlock date.
+			if (ach->unlock_time == 0) {
+				uint32_t when = ra_lookup_unlock_time(ach->id, hardcore);
+				if (when > 0) {
+					// Cast away const: the achievement list points at rcheevos'
+					// real structs; setting the display field is safe on the main
+					// thread (same pattern as the deferred sync-apply path).
+					((rc_client_achievement_t*)ach)->unlock_time = (time_t)when;
+				}
 			}
 		}
 	}
@@ -1152,6 +1280,14 @@ static void ra_http_callback(HTTP_Response* response, void* userdata) {
 		}
 	}
 	
+	// Capture original unlock timestamps from the startsession (after patching,
+	// so injected offline unlocks are included) — encore mode zeroes rcheevos'
+	// unlock_time, and this lets the detail page still show the unlock date.
+	if (body && http_status == 200 &&
+	    data->post_data && strstr(data->post_data, "r=startsession")) {
+		ra_capture_unlock_times(body);
+	}
+	
 	// Queue the response for main thread processing
 	// The queue makes a copy of the body, so we can free the response after
 	if (!ra_queue_push(body, body_length, http_status, data->callback, data->callback_data)) {
@@ -1192,6 +1328,11 @@ static void ra_server_call(const rc_api_request_t* request,
 			// Cache hit - deliver cached response via queue
 			RA_LOG_DEBUG("Offline cache hit: %s (%zu bytes)\n",
 			             req_type ? req_type : "unknown", cached_len);
+			// Capture unlock timestamps from a cached startsession too, so the
+			// detail-page date works in encore mode even on a fully-offline boot.
+			if (req_type && strcmp(req_type, "startsession") == 0) {
+				ra_capture_unlock_times(cached_body);
+			}
 			if (!ra_queue_push(cached_body, cached_len, 200, callback, callback_data)) {
 				RA_LOG_WARN("Failed to queue cached response\n");
 			}
@@ -1407,9 +1548,19 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 				RA_Offline_addPendingCacheEntry(event->achievement->id);
 			}
 		} else {
+			// rcheevos has just overwritten unlock_time with "now" while
+			// re-awarding this achievement — restore the original server earn
+			// time so the detail page keeps showing the real date.
+			uint32_t orig = ra_lookup_unlock_time(event->achievement->id, hardcore);
+			if (orig > 0) {
+				// Cast away const: the event points at rcheevos' real struct;
+				// updating the display field on the main thread is safe (same
+				// pattern as the snapshot and deferred sync-apply paths).
+				((rc_client_achievement_t*)event->achievement)->unlock_time = (time_t)orig;
+			}
 			RA_LOG_INFO("[AWARD_TRIGGER] ach=%u already credited at load "
 			            "(encore re-trigger, hardcore=%d) — not queuing for "
-			            "offline sync\n",
+			            "offline sync, restored original unlock time\n",
 			            event->achievement->id, hardcore);
 		}
 		}
